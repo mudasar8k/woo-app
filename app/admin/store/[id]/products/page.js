@@ -1,4 +1,4 @@
-﻿import { requireAdmin } from '../../../../lib/auth'
+import { requireAdmin } from '../../../../lib/auth'
 import db from '../../../../lib/db'
 import { redirect } from 'next/navigation'
 import ProductReview from '../../../../components/product-review'
@@ -30,10 +30,18 @@ export default async function ProductsPage({ params, searchParams }) {
     }
   }
 
-  const storeResult = await db.query(
-    'SELECT id, name, connection_method, price_rule_percent FROM stores WHERE id = $1',
-    [storeId]
-  )
+  let storeResult
+  try {
+    storeResult = await db.query(
+      'SELECT id, name, connection_method, price_rule_percent, pricing_mode, fallback_markup_percent FROM stores WHERE id = $1',
+      [storeId]
+    )
+  } catch {
+    storeResult = await db.query(
+      'SELECT id, name, connection_method, price_rule_percent FROM stores WHERE id = $1',
+      [storeId]
+    )
+  }
 
   if (storeResult.rows.length === 0) {
     redirect('/dashboard')
@@ -42,6 +50,43 @@ export default async function ProductsPage({ params, searchParams }) {
   const store = storeResult.rows[0]
   const pricing = await getStorePricingContext(store)
   const vendorJoin = isStoreAdmin ? VENDOR_STORE_JOIN : ''
+
+    // Fetch active range rules
+  let rangeRules = []
+  try {
+    const rulesRes = await db.query(
+      'SELECT id, min_cost, max_cost, markup_percent, active FROM store_pricing_rules WHERE store_id = $1 AND active = true ORDER BY min_cost ASC',
+      [storeId]
+    )
+    rangeRules = rulesRes.rows.map((r) => ({
+      id: r.id,
+      min_cost: Number(r.min_cost),
+      max_cost: r.max_cost !== null ? Number(r.max_cost) : null,
+      markup_percent: Number(r.markup_percent),
+      active: r.active,
+    }))
+  } catch {
+    rangeRules = []
+  }
+
+  // Fetch active category rules
+  let categoryRules = []
+  try {
+    const catRes = await db.query(
+      'SELECT id, store_id, category, markup_percent, priority, active FROM store_category_pricing_rules WHERE store_id = $1 AND active = true ORDER BY priority ASC, id ASC',
+      [storeId]
+    )
+    categoryRules = catRes.rows.map((r) => ({
+      id: r.id,
+      store_id: r.store_id,
+      category: r.category,
+      markup_percent: Number(r.markup_percent),
+      priority: Number(r.priority) || 0,
+      active: r.active,
+    }))
+  } catch {
+    categoryRules = []
+  }
 
   function buildFilterParts(startIndex) {
     const parts = []
@@ -91,31 +136,65 @@ export default async function ProductsPage({ params, searchParams }) {
   const limitIndex = listFilters.nextIndex
   const offsetIndex = listFilters.nextIndex + 1
 
-  const productsResult = await db.query(
-    `SELECT p.id, p.sku, p.name, p.price, p.regular_price, p.sale_price, p.stock_quantity,
-            p.status, p.created_at, p.reviewed_at, p.brand, p.categories, p.images, ps.woo_product_id,
-            ps.status AS store_status, ps.removed_at,
-            COALESCE(v.variant_count, 0) as variant_count,
-            v.min_cost_price,
-            v.first_variant_image,
-            ven.name AS vendor_name
-     FROM products p
-     LEFT JOIN product_stores ps ON ps.product_id = p.id AND ps.store_id = $1
-     LEFT JOIN vendors ven ON ven.id = p.vendor_id
-     ${vendorJoin}
-     LEFT JOIN (
-       SELECT product_id,
-              COUNT(*) as variant_count,
-              MIN(COALESCE(regular_price, price)) as min_cost_price,
-              MIN(CASE WHEN image IS NOT NULL AND image != '' THEN image ELSE NULL END) as first_variant_image
-       FROM product_variations
-       GROUP BY product_id
-     ) v ON v.product_id = p.id
-     ${whereClause}
-     ORDER BY p.created_at DESC
-     LIMIT $${limitIndex} OFFSET $${offsetIndex}`,
-    queryParams
-  )
+  let productsResult
+  try {
+    productsResult = await db.query(
+      `SELECT p.id, p.sku, p.name, p.price, p.regular_price, p.sale_price, p.stock_quantity,
+              p.status, p.created_at, p.reviewed_at, p.brand, p.categories, p.images, ps.woo_product_id,
+              ps.status AS store_status, ps.removed_at,
+              COALESCE(v.variant_count, 0) as variant_count,
+              v.min_cost_price,
+              v.first_variant_image,
+              ven.name AS vendor_name,
+              psp.override_type,
+              psp.custom_markup_percent,
+              psp.fixed_price
+       FROM products p
+       LEFT JOIN product_stores ps ON ps.product_id = p.id AND ps.store_id = $1
+       LEFT JOIN product_store_pricing psp ON psp.product_id = p.id AND psp.store_id = $1
+       LEFT JOIN vendors ven ON ven.id = p.vendor_id
+       ${vendorJoin}
+       LEFT JOIN (
+         SELECT product_id,
+                COUNT(*) as variant_count,
+                MIN(COALESCE(regular_price, price)) as min_cost_price,
+                MIN(CASE WHEN image IS NOT NULL AND image != '' THEN image ELSE NULL END) as first_variant_image
+         FROM product_variations
+         GROUP BY product_id
+       ) v ON v.product_id = p.id
+       ${whereClause}
+       ORDER BY p.created_at DESC
+       LIMIT $${limitIndex} OFFSET $${offsetIndex}`,
+      queryParams
+    )
+  } catch {
+    // Fallback if product_store_pricing table is not yet migrated
+    productsResult = await db.query(
+      `SELECT p.id, p.sku, p.name, p.price, p.regular_price, p.sale_price, p.stock_quantity,
+              p.status, p.created_at, p.reviewed_at, p.brand, p.categories, p.images, ps.woo_product_id,
+              ps.status AS store_status, ps.removed_at,
+              COALESCE(v.variant_count, 0) as variant_count,
+              v.min_cost_price,
+              v.first_variant_image,
+              ven.name AS vendor_name
+       FROM products p
+       LEFT JOIN product_stores ps ON ps.product_id = p.id AND ps.store_id = $1
+       LEFT JOIN vendors ven ON ven.id = p.vendor_id
+       ${vendorJoin}
+       LEFT JOIN (
+         SELECT product_id,
+                COUNT(*) as variant_count,
+                MIN(COALESCE(regular_price, price)) as min_cost_price,
+                MIN(CASE WHEN image IS NOT NULL AND image != '' THEN image ELSE NULL END) as first_variant_image
+         FROM product_variations
+         GROUP BY product_id
+       ) v ON v.product_id = p.id
+       ${whereClause}
+       ORDER BY p.created_at DESC
+       LIMIT $${limitIndex} OFFSET $${offsetIndex}`,
+      queryParams
+    )
+  }
 
   const countStartIndex = isStoreAdmin ? 2 : 1
   const countFilters = buildFilterParts(countStartIndex)
@@ -166,6 +245,14 @@ export default async function ProductsPage({ params, searchParams }) {
   })
   const categories = Array.from(categoriesSet).sort((a, b) => a.localeCompare(b))
 
+  const storePricingContext = {
+    pricing_mode: store.pricing_mode || 'legacy_markup',
+    price_rule_percent: pricing.override,
+    fallback_markup_percent: store.fallback_markup_percent ? Number(store.fallback_markup_percent) : null,
+    default_price_rule_percent: pricing.defaultPercent,
+    defaultPercent: pricing.defaultPercent,
+  }
+
   return (
     <div>
       <div className="mb-6">
@@ -189,6 +276,9 @@ export default async function ProductsPage({ params, searchParams }) {
         storeId={storeId}
         connectionMethod={store.connection_method}
         priceRulePercent={pricing.effective}
+        storePricingContext={storePricingContext}
+        rangeRules={rangeRules}
+        categoryRules={categoryRules}
         products={productsResult.rows}
         status={status}
         currentPage={page}

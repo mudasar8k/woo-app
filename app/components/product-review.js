@@ -3,12 +3,16 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
-import { applyPriceRule, formatMoney, resolveCostPrice, resolveStorePrice } from '@/app/lib/pricing'
+import { applyPriceRule, formatMoney, resolveCostPrice, resolveStorePrice, resolveItemPrice } from '@/app/lib/pricing'
+import ProductPriceOverrideModal from '@/app/components/ProductPriceOverrideModal'
 
 export default function ProductReview({
   storeId,
   connectionMethod,
   priceRulePercent = null,
+  storePricingContext = null,
+  rangeRules = [],
+  categoryRules = [],
   products,
   status,
   currentPage,
@@ -36,6 +40,7 @@ export default function ProductReview({
   const [selectedIds, setSelectedIds] = useState(new Set())
   const selectAllRef = useRef(null)
   const [removingProduct, setRemovingProduct] = useState(null)
+  const [overrideModalProduct, setOverrideModalProduct] = useState(null)
 
   const getProductCost = (product) => {
     if (product.min_cost_price !== null && product.min_cost_price !== undefined) {
@@ -824,7 +829,46 @@ export default function ProductReview({
                         ) : null}
                       </td>
                       <td className="px-3 py-3.5 whitespace-nowrap text-sm text-gray-900 font-medium">
-                        {formatMoney(applyPriceRule(getProductCost(product), priceRulePercent))}
+                        {(() => {
+                          const cost = getProductCost(product)
+                          const overrideObj = product.override_type && product.override_type !== 'store_rules' ? {
+                            override_type: product.override_type,
+                            custom_markup_percent: product.custom_markup_percent !== null ? Number(product.custom_markup_percent) : null,
+                            fixed_price: product.fixed_price !== null ? Number(product.fixed_price) : null,
+                          } : null
+                          const context = storePricingContext || { price_rule_percent: priceRulePercent, pricing_mode: 'legacy_markup' }
+                          const resolved = resolveItemPrice(
+                            cost,
+                            context,
+                            rangeRules,
+                            overrideObj,
+                            product.categories,
+                            categoryRules
+                          )
+
+                          return (
+                            <div>
+                              <span className="font-bold">{formatMoney(resolved.sellingPrice)}</span>
+                              {product.override_type === 'custom_markup' ? (
+                                <span className="block mt-0.5 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-purple-100 text-purple-800">
+                                  Custom +{product.custom_markup_percent}%
+                                </span>
+                              ) : product.override_type === 'fixed_price' ? (
+                                <span className="block mt-0.5 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-emerald-100 text-emerald-800">
+                                  Fixed Override
+                                </span>
+                              ) : resolved.source === 'category_rule' ? (
+                                <span className="block mt-0.5 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-indigo-100 text-indigo-800">
+                                  Cat: {resolved.matchedCategory} (+{resolved.appliedMarkup}%)
+                                </span>
+                              ) : (
+                                <span className="block text-[10px] text-gray-400 font-normal">
+                                  {context.pricing_mode === 'range_rules' ? 'Tiered rules' : 'Store rules'}
+                                </span>
+                              )}
+                            </div>
+                          )
+                        })()}
                       </td>
                       <td className="px-3 py-3.5 whitespace-nowrap">
                         {getStatusBadge(product.status)}
@@ -885,6 +929,13 @@ export default function ProductReview({
                               {loading === product.id ? 'Syncing...' : 'Sync to Store'}
                             </button>
                           )}
+                          <button
+                            type="button"
+                            onClick={() => setOverrideModalProduct(product)}
+                            className="text-indigo-600 hover:text-indigo-900 text-xs font-medium whitespace-nowrap flex items-center gap-1 mt-0.5"
+                          >
+                            <span>🏷️</span> Price Override
+                          </button>
                         </div>
                       </td>
                     </tr>

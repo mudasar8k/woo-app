@@ -1,7 +1,12 @@
-﻿import { NextResponse } from 'next/server'
+import { NextResponse } from 'next/server'
 import { authenticateExportRequest } from '../../../lib/export-auth'
 import db from '../../../lib/db'
-import { resolveCostPrice, resolveStorePrice } from '../../../lib/pricing'
+import {
+  resolveCostPrice,
+  resolveItemPrice,
+  loadStorePricingEngine,
+  loadProductStoreOverrides,
+} from '../../../lib/pricing'
 
 const DEFAULT_LIMIT = 200
 const MAX_LIMIT = 500
@@ -14,9 +19,11 @@ function splitList(value) {
     .filter(Boolean)
 }
 
-function serializeVariation(row, store) {
+function serializeVariation(row, storeContext, rangeRules, productOverride, productCategories, categoryRules) {
   const cost = resolveCostPrice(row)
-  const sell = resolveStorePrice(row, store)
+  const calc = resolveItemPrice(cost, storeContext, rangeRules, productOverride, productCategories, categoryRules)
+  const sell = calc.sellingPrice
+
   return {
     sku: row.sku,
     price: sell,
@@ -36,9 +43,11 @@ function serializeVariation(row, store) {
   }
 }
 
-function serializeProduct(row, variations, store) {
+function serializeProduct(row, variations, storeContext, rangeRules, productOverride, categoryRules) {
   const cost = resolveCostPrice(row)
-  const sell = resolveStorePrice(row, store)
+  const calc = resolveItemPrice(cost, storeContext, rangeRules, productOverride, row.categories, categoryRules)
+  const sell = calc.sellingPrice
+
   return {
     sku: row.sku,
     name: row.name,
@@ -63,7 +72,9 @@ function serializeProduct(row, variations, store) {
     status: row.status,
     woo_product_id: row.woo_product_id,
     updated_at: row.updated_at,
-    variations: variations.map((v) => serializeVariation(v, store)),
+    variations: variations.map((v) =>
+      serializeVariation(v, storeContext, rangeRules, productOverride, row.categories, categoryRules)
+    ),
   }
 }
 
@@ -80,6 +91,11 @@ export async function GET(request) {
     if (!auth.ok) {
       return NextResponse.json({ error: auth.error }, { status: auth.status })
     }
+
+    const storeId = auth.store.id
+
+    // 1. Load centralized pricing engine for the store (cached once per request)
+    const { storeContext, rangeRules, categoryRules } = await loadStorePricingEngine(db, storeId)
 
     const { searchParams } = new URL(request.url)
     const limit = Math.min(
@@ -105,7 +121,7 @@ export async function GET(request) {
        LEFT JOIN product_stores ps ON ps.product_id = p.id AND ps.store_id = $${params.length + 1}
        INNER JOIN vendor_stores vs ON vs.vendor_id = p.vendor_id AND vs.store_id = $${params.length + 1}
        WHERE ${whereClause}`,
-      [...params, auth.store.id]
+      [...params, storeId]
     )
     const total = parseInt(totalResult.rows[0].total, 10)
 
@@ -117,33 +133,55 @@ export async function GET(request) {
        INNER JOIN vendor_stores vs ON vs.vendor_id = p.vendor_id AND vs.store_id = $${params.length + 1}
        WHERE ${whereClause}
        ORDER BY p.id ASC LIMIT $${params.length + 2} OFFSET $${params.length + 3}`,
-      [...params, auth.store.id, limit, offset]
+      [...params, storeId, limit, offset]
     )
 
     const productIds = productsResult.rows.map((p) => p.id)
     let variationsByProduct = {}
+    let productOverridesMap = new Map()
 
     if (productIds.length > 0) {
-      const variationsResult = await db.query(
-        `SELECT * FROM product_variations WHERE product_id = ANY($1::int[]) ORDER BY id ASC`,
-        [productIds]
-      )
+      // Parallel batch fetch: variations + product pricing overrides (Zero N+1 queries)
+      const [variationsResult, overridesMap] = await Promise.all([
+        db.query(
+          `SELECT * FROM product_variations WHERE product_id = ANY($1::int[]) ORDER BY id ASC`,
+          [productIds]
+        ),
+        loadProductStoreOverrides(db, storeId, productIds),
+      ])
+
       variationsByProduct = variationsResult.rows.reduce((acc, variation) => {
         acc[variation.product_id] = acc[variation.product_id] || []
         acc[variation.product_id].push(variation)
         return acc
       }, {})
+
+      productOverridesMap = overridesMap
     }
 
-    const products = productsResult.rows.map((row) =>
-      serializeProduct(row, variationsByProduct[row.id] || [], auth.store)
-    )
+    const products = productsResult.rows.map((row) => {
+      const override = productOverridesMap.get(row.id) || null
+      return serializeProduct(
+        row,
+        variationsByProduct[row.id] || [],
+        storeContext,
+        rangeRules,
+        override,
+        categoryRules
+      )
+    })
 
     const nextOffset = offset + productsResult.rows.length
     const hasMore = nextOffset < total
 
     return NextResponse.json({
-      store: auth.store,
+      store: {
+        id: auth.store.id,
+        name: auth.store.name,
+        pricing_mode: storeContext.pricing_mode,
+        price_rule_percent: storeContext.price_rule_percent,
+        fallback_markup_percent: storeContext.fallback_markup_percent,
+      },
       generated_at: new Date().toISOString(),
       total,
       count: products.length,

@@ -3,7 +3,12 @@ import { requireAdmin } from '../../../lib/auth'
 import db from '../../../lib/db'
 import { auth } from '../../auth/[...nextauth]/route'
 import { requireStoreAdminApi, verifyAdminStoreAccess } from '../../../lib/role-guards'
-import { resolveStorePrice } from '../../../lib/pricing'
+import {
+  resolveCostPrice,
+  resolveItemPrice,
+  loadStorePricingEngine,
+  loadProductStoreOverrides,
+} from '../../../lib/pricing'
 import { getStorePricingContext } from '../../../lib/app-settings'
 
 const WooCommerceClient = require('../../../lib/woocommerce')
@@ -280,7 +285,9 @@ export async function POST(request) {
 
         // For simple products, add pricing and stock
         if (!hasVariations) {
-          const sellPrice = resolveStorePrice(product, store)
+          const productOverride = productOverridesMap.get(product.id) || null
+        const parentCost = resolveCostPrice(product)
+        const sellPrice = resolveItemPrice(parentCost, storeContext, rangeRules, productOverride, product.categories, categoryRules).sellingPrice
           wooProductData.regular_price = sellPrice !== null ? sellPrice.toString() : ''
           wooProductData.sale_price = product.sale_price?.toString() || undefined
           wooProductData.manage_stock = product.manage_stock || (product.stock_quantity !== null)
@@ -443,7 +450,8 @@ export async function POST(request) {
                 }
               }
 
-              const sellPrice = resolveStorePrice(variation, store)
+              const varCost = resolveCostPrice(variation)
+              const sellPrice = resolveItemPrice(varCost, storeContext, rangeRules, productOverride, product.categories, categoryRules).sellingPrice
               const wooVariationData = {
                 sku: variation.sku || undefined,
                 regular_price: sellPrice !== null ? sellPrice.toString() : '',

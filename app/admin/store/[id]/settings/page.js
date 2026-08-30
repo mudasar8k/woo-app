@@ -21,15 +21,29 @@ export default async function StoreSettingsPage({ params }) {
     redirect('/unauthorized')
   }
 
-  const storeResult = await db.query(
-    'SELECT id, name, price_rule_percent FROM stores WHERE id = $1',
-    [storeId]
-  )
-  if (storeResult.rows.length === 0) {
+  let store = null
+  try {
+    const storeResult = await db.query(
+      'SELECT id, name, price_rule_percent, pricing_mode, fallback_markup_percent FROM stores WHERE id = $1',
+      [storeId]
+    )
+    if (storeResult.rows.length > 0) {
+      store = storeResult.rows[0]
+    }
+  } catch {
+    const storeResult = await db.query(
+      'SELECT id, name, price_rule_percent FROM stores WHERE id = $1',
+      [storeId]
+    )
+    if (storeResult.rows.length > 0) {
+      store = storeResult.rows[0]
+    }
+  }
+
+  if (!store) {
     redirect('/dashboard')
   }
 
-  const store = storeResult.rows[0]
   const pricing = await getStorePricingContext(store)
 
   return (
@@ -45,6 +59,8 @@ export default async function StoreSettingsPage({ params }) {
         defaultPercent={pricing.defaultPercent}
         initialEffective={pricing.effective}
         initialIsOverride={pricing.isOverride}
+        initialPricingMode={store.pricing_mode || 'legacy_markup'}
+        initialFallbackMarkup={store.fallback_markup_percent !== null && store.fallback_markup_percent !== undefined ? Number(store.fallback_markup_percent) : null}
       />
     </div>
   )

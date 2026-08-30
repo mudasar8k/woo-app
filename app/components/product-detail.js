@@ -3,6 +3,7 @@
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { formatMoney, resolveCostPrice, resolveStorePrice } from '@/app/lib/pricing'
+import ProductPriceOverrideCard from '@/app/components/ProductPriceOverrideCard'
 
 export default function ProductDetail({ storeId, connectionMethod, priceRulePercent = null, product, variations }) {
   const isPluginStore = connectionMethod === 'plugin'

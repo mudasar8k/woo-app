@@ -2,9 +2,9 @@ export const dynamic = 'force-dynamic'
 export const revalidate = 0
 
 import { NextResponse } from 'next/server'
-import db from '../../../../lib/db'
-import { auth } from '../../../auth/[...nextauth]/route'
-import { requireAdminOrSuperAdminApi } from '../../../../lib/role-guards'
+import db from '@/app/lib/db'
+import { auth } from '@/app/api/auth/[...nextauth]/route'
+import { requireAdminOrSuperAdminApi } from '@/app/lib/role-guards'
 
 export async function GET() {
   try {
@@ -40,32 +40,85 @@ export async function GET() {
       safeHostPrefix = 'error'
     }
 
-    // 3. Store 4 config
-    const store4Res = await db.query(
-      `SELECT id, name, pricing_mode, price_rule_percent, fallback_markup_percent
-       FROM stores
-       WHERE id = 4`
-    )
+    // 3. Store 4 config & column check
+    let store4 = null
+    let pricingModeColumnExists = false
+    try {
+      const colCheck = await db.query(
+        `SELECT column_name
+         FROM information_schema.columns
+         WHERE table_schema = 'public'
+           AND table_name = 'stores'
+           AND column_name = 'pricing_mode'`
+      )
+      pricingModeColumnExists = colCheck.rows.length > 0
+    } catch {
+      pricingModeColumnExists = false
+    }
 
-    // 4. Store 4 pricing rules in database
-    const rulesRes = await db.query(
-      `SELECT id, store_id, min_cost, max_cost, markup_percent, sort_order, active
-       FROM store_pricing_rules
-       WHERE store_id = 4
-       ORDER BY sort_order ASC, id ASC`
-    )
+    try {
+      if (pricingModeColumnExists) {
+        const store4Res = await db.query(
+          `SELECT id, name, pricing_mode, price_rule_percent, fallback_markup_percent
+           FROM stores
+           WHERE id = 4`
+        )
+        store4 = store4Res.rows[0] || null
+      } else {
+        const store4Res = await db.query(
+          `SELECT id, name, price_rule_percent
+           FROM stores
+           WHERE id = 4`
+        )
+        store4 = store4Res.rows[0] || null
+      }
+    } catch {
+      store4 = null
+    }
 
-    // 5. Store 4 category pricing rules in database
-    const catRulesRes = await db.query(
-      `SELECT id, store_id, category, markup_percent, priority, active
-       FROM store_category_pricing_rules
-       WHERE store_id = 4
-       ORDER BY priority ASC, id ASC`
-    )
+    // 4. Check tables existence
+    let storePricingRulesTableExists = false
+    let productStorePricingTableExists = false
+    let storeCategoryPricingRulesTableExists = false
+    try {
+      const t1 = await db.query(`SELECT to_regclass('public.store_pricing_rules') as reg`)
+      storePricingRulesTableExists = t1.rows[0]?.reg !== null
+    } catch {}
+
+    try {
+      const t2 = await db.query(`SELECT to_regclass('public.product_store_pricing') as reg`)
+      productStorePricingTableExists = t2.rows[0]?.reg !== null
+    } catch {}
+
+    try {
+      const t3 = await db.query(`SELECT to_regclass('public.store_category_pricing_rules') as reg`)
+      storeCategoryPricingRulesTableExists = t3.rows[0]?.reg !== null
+    } catch {}
+
+    // 5. Store 4 pricing rules count
+    let rules = []
+    if (storePricingRulesTableExists) {
+      try {
+        const rulesRes = await db.query(
+          `SELECT id, store_id, min_cost, max_cost, markup_percent, sort_order, active
+           FROM store_pricing_rules
+           WHERE store_id = 4
+           ORDER BY sort_order ASC, id ASC`
+        )
+        rules = rulesRes.rows.map((r) => ({
+          id: r.id,
+          min_cost: Number(r.min_cost),
+          max_cost: r.max_cost !== null ? Number(r.max_cost) : null,
+          markup_percent: Number(r.markup_percent),
+          sort_order: r.sort_order,
+          active: r.active,
+        }))
+      } catch {}
+    }
 
     return NextResponse.json(
       {
-        deployed_commit: process.env.VERCEL_GIT_COMMIT_SHA || 'a6f277e04939fb57d4952a039eded47f32178b8d',
+        deployed_commit: process.env.VERCEL_GIT_COMMIT_SHA || 'dev-head',
         vercel_env: process.env.VERCEL_ENV || 'unknown',
         database_info: {
           database_name: dbInfoRes.rows[0]?.db_name,
@@ -74,25 +127,16 @@ export async function GET() {
           is_pooled: isPooled,
           server_addr: dbInfoRes.rows[0]?.server_addr ? String(dbInfoRes.rows[0].server_addr) : 'cloud',
         },
+        schema_status: {
+          stores_has_pricing_mode: pricingModeColumnExists,
+          has_store_pricing_rules: storePricingRulesTableExists,
+          has_product_store_pricing: productStorePricingTableExists,
+          has_store_category_pricing_rules: storeCategoryPricingRulesTableExists,
+        },
         store_4: {
-          config: store4Res.rows[0] || null,
-          pricing_rules_count: rulesRes.rows.length,
-          pricing_rules: rulesRes.rows.map((r) => ({
-            id: r.id,
-            min_cost: Number(r.min_cost),
-            max_cost: r.max_cost !== null ? Number(r.max_cost) : null,
-            markup_percent: Number(r.markup_percent),
-            sort_order: r.sort_order,
-            active: r.active,
-          })),
-          category_rules_count: catRulesRes.rows.length,
-          category_rules: catRulesRes.rows.map((r) => ({
-            id: r.id,
-            category: r.category,
-            markup_percent: Number(r.markup_percent),
-            priority: r.priority,
-            active: r.active,
-          })),
+          config: store4,
+          pricing_rules_count: rules.length,
+          pricing_rules: rules,
         },
       },
       {

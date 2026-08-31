@@ -61,8 +61,10 @@ export async function GET(request, { params }) {
       const catRes = await db.query(
         `SELECT DISTINCT p.categories
          FROM products p
-         LEFT JOIN vendor_stores vs ON vs.vendor_id = p.vendor_id AND vs.store_id = $1
-         WHERE (p.store_id = $1 OR vs.store_id = $1) AND p.categories IS NOT NULL AND p.categories != ''`,
+         JOIN product_stores ps ON ps.product_id = p.id AND ps.store_id = $1
+         WHERE ps.store_id = $1
+           AND (ps.status IS NULL OR ps.status != 'removed')
+           AND p.categories IS NOT NULL AND p.categories != ''`,
         [storeId]
       )
       const catSet = new Set()

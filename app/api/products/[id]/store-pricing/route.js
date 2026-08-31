@@ -40,8 +40,8 @@ export async function GET(request, { params }) {
     const prodRes = await db.query(
       `SELECT p.id, p.name, p.sku, p.regular_price, p.price
        FROM products p
-       LEFT JOIN vendor_stores vs ON vs.vendor_id = p.vendor_id AND vs.store_id = $2
-       WHERE p.id = $1 AND (p.store_id = $2 OR vs.store_id = $2)`,
+       JOIN product_stores ps ON ps.product_id = p.id AND ps.store_id = $2
+       WHERE p.id = $1 AND (ps.status IS NULL OR ps.status != 'removed')`,
       [productId, storeId]
     )
 
@@ -121,8 +121,8 @@ export async function PUT(request, { params }) {
     const prodRes = await db.query(
       `SELECT p.id
        FROM products p
-       LEFT JOIN vendor_stores vs ON vs.vendor_id = p.vendor_id AND vs.store_id = $2
-       WHERE p.id = $1 AND (p.store_id = $2 OR vs.store_id = $2)`,
+       JOIN product_stores ps ON ps.product_id = p.id AND ps.store_id = $2
+       WHERE p.id = $1 AND (ps.status IS NULL OR ps.status != 'removed')`,
       [productId, storeId]
     )
 

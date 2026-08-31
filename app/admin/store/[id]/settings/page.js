@@ -114,6 +114,8 @@ export default async function StoreSettingsPage({ params }) {
     availableCategories = []
   }
 
+  console.log('[SSR StoreSettingsPage] storeId:', storeId, 'initialRules count:', initialRules.length, 'rules:', initialRules.map(r => `${r.min_cost}-${r.max_cost}@${r.markup_percent}%`))
+
   return (
     <div>
       <div className="mb-6">

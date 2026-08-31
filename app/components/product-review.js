@@ -1128,6 +1128,20 @@ export default function ProductReview({
         )}
       </div>
 
+      {/* ── Product Price Override Modal ───────────────────────────────── */}
+      {overrideModalProduct && (
+        <ProductPriceOverrideModal
+          isOpen={Boolean(overrideModalProduct)}
+          product={overrideModalProduct}
+          storeId={storeId}
+          onClose={() => setOverrideModalProduct(null)}
+          onSaved={(newOverride) => {
+            setOverrideModalProduct(null)
+            router.refresh()
+          }}
+        />
+      )}
+
       {removingProduct && (
         <div className="fixed inset-0 z-50 overflow-y-auto bg-black bg-opacity-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-lg max-w-md w-full p-6 shadow-xl">

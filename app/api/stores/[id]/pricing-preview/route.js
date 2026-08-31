@@ -8,10 +8,9 @@ import {
   requireAdminOrSuperAdminApi,
   verifyAdminStoreAccess,
 } from '../../../../lib/role-guards'
-import { getStorePricingContext } from '../../../../lib/app-settings'
 import {
-  resolveItemPrice,
   resolveCostPrice,
+  resolveItemPrice,
   loadStorePricingEngine,
   loadProductStoreOverrides,
   toNumber,
@@ -20,12 +19,11 @@ import {
 
 /**
  * POST /api/stores/[id]/pricing-preview
- * READ-ONLY live pricing calculator & impact preview endpoint with Category Rules support.
  *
- * Supports:
- * 1. Single cost calculation: { "cost": 12.50, "categories": "T-Shirts" }
- * 2. Product & variations calculation: { "product_id": 123 }
- * 3. Batch Catalog Impact Preview: { "preview_sample": true, "preview_rules": [...], "preview_category_rules": [...] }
+ * Provides real-time preview of pricing calculations:
+ * 1. Single cost calculation: { cost: 12.50, preview_mode?: 'range_rules', preview_rules?: [...], preview_fallback?: 40, categories?: 'T-Shirts' }
+ * 2. Catalog sample preview: { preview_sample: true, limit?: 20, preview_rules?: [...], preview_fallback?: 40, preview_category_rules?: [...] }
+ * 3. Specific product calculation: { product_id: 123 }
  */
 export async function POST(request, { params }) {
   try {
@@ -47,13 +45,17 @@ export async function POST(request, { params }) {
 
     const body = await request.json().catch(() => ({}))
 
-    // 1. Fetch Store Pricing Engine Context (cached)
+    // 1. Load active pricing context, saved range rules, and saved category rules from database
     const { storeContext, rangeRules: savedRangeRules, categoryRules: savedCategoryRules } =
       await loadStorePricingEngine(db, storeId)
 
-    // ── Case A: Ad-hoc Single Cost Calculation ───────────────────────────
-    if (body.cost !== undefined && body.cost !== null) {
+    // ── Case A: Single Arbitrary Cost Preview (Live Calculator Widget) ────
+    if (body.cost !== undefined && body.cost !== null && body.cost !== '') {
       const rawCost = toNumber(body.cost)
+      if (rawCost === null || rawCost < 0) {
+        return NextResponse.json({ error: 'Invalid cost value' }, { status: 400 })
+      }
+
       const rangeRulesToUse = Array.isArray(body.preview_rules) ? body.preview_rules : savedRangeRules
       const categoryRulesToUse = Array.isArray(body.preview_category_rules)
         ? body.preview_category_rules
@@ -107,82 +109,149 @@ export async function POST(request, { params }) {
             : storeContext.fallback_markup_percent,
       }
 
-      const itemsRes = await db.query(
-        `SELECT p.id as product_id, p.sku as product_sku, p.name as product_name,
-                p.categories as product_categories,
-                COALESCE(p.regular_price, p.price) as product_cost,
-                pv.id as variation_id, pv.sku as variation_sku,
-                COALESCE(pv.regular_price, pv.price) as variation_cost,
-                pv.size, pv.color
+      // Query distinct active/exportable products linked to this store
+      const prodsRes = await db.query(
+        `SELECT p.id, p.sku, p.name, p.categories, p.price, p.regular_price
          FROM products p
-         LEFT JOIN product_variations pv ON pv.product_id = p.id
-         LEFT JOIN vendor_stores vs ON vs.vendor_id = p.vendor_id AND vs.store_id = $1
-         WHERE (p.store_id = $1 OR vs.store_id = $1)
-         ORDER BY p.id ASC, pv.id ASC
+         JOIN product_stores ps ON ps.product_id = p.id AND ps.store_id = $1
+         WHERE ps.store_id = $1
+           AND (ps.status IS NULL OR ps.status NOT IN ('removed', 'rejected'))
+           AND (p.status IS NULL OR p.status != 'rejected')
+         ORDER BY p.id ASC
          LIMIT $2`,
-        [storeId, sampleLimit * 2]
+        [storeId, sampleLimit]
       )
 
-      const productIds = Array.from(new Set(itemsRes.rows.map((r) => r.product_id)))
-      const overridesMap = await loadProductStoreOverrides(db, storeId, productIds)
+      const productIds = prodsRes.rows.map((p) => p.id)
+      let variationsByProduct = new Map()
+      let overridesMap = new Map()
+
+      if (productIds.length > 0) {
+        // Parallel batch fetch: variations + product pricing overrides (Zero N+1 queries)
+        const [varsRes, loadedOverrides] = await Promise.all([
+          db.query(
+            `SELECT id, product_id, sku, price, regular_price, size, color
+             FROM product_variations
+             WHERE product_id = ANY($1::int[])
+             ORDER BY id ASC`,
+            [productIds]
+          ),
+          loadProductStoreOverrides(db, storeId, productIds),
+        ])
+
+        for (const v of varsRes.rows) {
+          if (!variationsByProduct.has(v.product_id)) {
+            variationsByProduct.set(v.product_id, [])
+          }
+          variationsByProduct.get(v.product_id).push(v)
+        }
+
+        overridesMap = loadedOverrides
+      }
 
       const comparisonItems = []
-      const seenSkus = new Set()
 
-      for (const row of itemsRes.rows) {
-        const isVariation = Boolean(row.variation_id)
-        const sku = isVariation ? row.variation_sku || row.product_sku : row.product_sku
-        if (!sku || seenSkus.has(sku)) continue
-        seenSkus.add(sku)
+      for (const prod of prodsRes.rows) {
+        const vars = variationsByProduct.get(prod.id) || []
+        const override = overridesMap.get(prod.id) || null
 
-        const cost = isVariation ? toNumber(row.variation_cost) : toNumber(row.product_cost)
-        if (cost === null) continue
+        if (vars.length > 0) {
+          // Select representative variation with valid supplier cost
+          const repVar =
+            vars.find((v) => resolveCostPrice(v) !== null && resolveCostPrice(v) > 0) || vars[0]
+          const cost = resolveCostPrice(repVar)
+          if (cost === null || cost <= 0) continue
 
-        const override = overridesMap.get(row.product_id) || null
+          const currentRes = resolveItemPrice(
+            cost,
+            storeContext,
+            savedRangeRules,
+            override,
+            prod.categories,
+            savedCategoryRules
+          )
 
-        // 1. Current Active Price
-        const currentRes = resolveItemPrice(
-          cost,
-          storeContext,
-          savedRangeRules,
-          override,
-          row.product_categories,
-          savedCategoryRules
-        )
+          const proposedRes = resolveItemPrice(
+            cost,
+            proposedContext,
+            proposedRangeRules,
+            override,
+            prod.categories,
+            proposedCategoryRules
+          )
 
-        // 2. Proposed Range/Category Price
-        const proposedRes = resolveItemPrice(
-          cost,
-          proposedContext,
-          proposedRangeRules,
-          override,
-          row.product_categories,
-          proposedCategoryRules
-        )
+          const currentPrice = currentRes.sellingPrice
+          const proposedPrice = proposedRes.sellingPrice
+          const diffAmount =
+            currentPrice !== null && proposedPrice !== null ? round2(proposedPrice - currentPrice) : 0
+          const diffPercent =
+            currentPrice && currentPrice > 0 ? round2(((proposedPrice - currentPrice) / currentPrice) * 100) : 0
 
-        const currentPrice = currentRes.sellingPrice
-        const proposedPrice = proposedRes.sellingPrice
-        const diffAmount = currentPrice !== null && proposedPrice !== null ? round2(proposedPrice - currentPrice) : 0
-        const diffPercent =
-          currentPrice && currentPrice > 0 ? round2(((proposedPrice - currentPrice) / currentPrice) * 100) : 0
+          comparisonItems.push({
+            product_id: prod.id,
+            name: prod.name,
+            sku: repVar.sku || prod.sku,
+            categories: prod.categories,
+            is_variation: true,
+            variation_attrs: [repVar.color, repVar.size].filter(Boolean).join(' / ') || null,
+            supplier_cost: cost,
+            current_price: currentPrice,
+            current_source: currentRes.source,
+            proposed_price: proposedPrice,
+            proposed_source: proposedRes.source,
+            applied_markup: proposedRes.appliedMarkup,
+            matched_category: proposedRes.matchedCategory || null,
+            diff_amount: diffAmount,
+            diff_percent: diffPercent,
+          })
+        } else {
+          // Simple product
+          const cost = resolveCostPrice(prod)
+          if (cost === null || cost <= 0) continue
 
-        comparisonItems.push({
-          product_id: row.product_id,
-          name: row.product_name,
-          sku,
-          categories: row.product_categories,
-          is_variation: isVariation,
-          variation_attrs: isVariation ? [row.color, row.size].filter(Boolean).join(' / ') : null,
-          supplier_cost: cost,
-          current_price: currentPrice,
-          current_source: currentRes.source,
-          proposed_price: proposedPrice,
-          proposed_source: proposedRes.source,
-          applied_markup: proposedRes.appliedMarkup,
-          matched_category: proposedRes.matchedCategory || null,
-          diff_amount: diffAmount,
-          diff_percent: diffPercent,
-        })
+          const currentRes = resolveItemPrice(
+            cost,
+            storeContext,
+            savedRangeRules,
+            override,
+            prod.categories,
+            savedCategoryRules
+          )
+
+          const proposedRes = resolveItemPrice(
+            cost,
+            proposedContext,
+            proposedRangeRules,
+            override,
+            prod.categories,
+            proposedCategoryRules
+          )
+
+          const currentPrice = currentRes.sellingPrice
+          const proposedPrice = proposedRes.sellingPrice
+          const diffAmount =
+            currentPrice !== null && proposedPrice !== null ? round2(proposedPrice - currentPrice) : 0
+          const diffPercent =
+            currentPrice && currentPrice > 0 ? round2(((proposedPrice - currentPrice) / currentPrice) * 100) : 0
+
+          comparisonItems.push({
+            product_id: prod.id,
+            name: prod.name,
+            sku: prod.sku,
+            categories: prod.categories,
+            is_variation: false,
+            variation_attrs: null,
+            supplier_cost: cost,
+            current_price: currentPrice,
+            current_source: currentRes.source,
+            proposed_price: proposedPrice,
+            proposed_source: proposedRes.source,
+            applied_markup: proposedRes.appliedMarkup,
+            matched_category: proposedRes.matchedCategory || null,
+            diff_amount: diffAmount,
+            diff_percent: diffPercent,
+          })
+        }
 
         if (comparisonItems.length >= sampleLimit) break
       }

@@ -4,6 +4,9 @@ import { redirect } from 'next/navigation'
 import { getStorePricingContext } from '../../../../lib/app-settings'
 import StorePriceRuleSettings from '../../../../components/StorePriceRuleSettings'
 
+export const dynamic = 'force-dynamic'
+export const revalidate = 0
+
 export default async function StoreSettingsPage({ params }) {
   const session = await requireAdmin()
   const { id } = await params
@@ -46,6 +49,71 @@ export default async function StoreSettingsPage({ params }) {
 
   const pricing = await getStorePricingContext(store)
 
+  // Fetch initial draft/active range pricing rules
+  let initialRules = []
+  try {
+    const rulesRes = await db.query(
+      `SELECT id, store_id, min_cost, max_cost, markup_percent, sort_order, active, created_at, updated_at
+       FROM store_pricing_rules
+       WHERE store_id = $1
+       ORDER BY min_cost ASC, sort_order ASC`,
+      [storeId]
+    )
+    initialRules = rulesRes.rows.map((r) => ({
+      id: r.id,
+      store_id: r.store_id,
+      min_cost: Number(r.min_cost),
+      max_cost: r.max_cost !== null ? Number(r.max_cost) : null,
+      markup_percent: Number(r.markup_percent),
+      sort_order: r.sort_order,
+      active: r.active,
+      created_at: r.created_at,
+      updated_at: r.updated_at,
+    }))
+  } catch {
+    initialRules = []
+  }
+
+  // Fetch initial category pricing rules
+  let initialCatRules = []
+  try {
+    const catRes = await db.query(
+      `SELECT id, store_id, category, markup_percent, priority, active, created_at, updated_at
+       FROM store_category_pricing_rules
+       WHERE store_id = $1
+       ORDER BY priority ASC, id ASC`,
+      [storeId]
+    )
+    initialCatRules = catRes.rows.map((r) => ({
+      id: r.id,
+      store_id: r.store_id,
+      category: r.category,
+      markup_percent: Number(r.markup_percent),
+      priority: Number(r.priority),
+      active: r.active,
+      created_at: r.created_at,
+      updated_at: r.updated_at,
+    }))
+  } catch {
+    initialCatRules = []
+  }
+
+  // Fetch available distinct categories from product catalog
+  let availableCategories = []
+  try {
+    const catTokensRes = await db.query(
+      `SELECT DISTINCT categories FROM products WHERE categories IS NOT NULL AND categories != ''`
+    )
+    const set = new Set()
+    for (const row of catTokensRes.rows) {
+      const tokens = String(row.categories).split(',').map((t) => t.trim()).filter(Boolean)
+      for (const t of tokens) set.add(t)
+    }
+    availableCategories = Array.from(set).sort()
+  } catch {
+    availableCategories = []
+  }
+
   return (
     <div>
       <div className="mb-6">
@@ -61,6 +129,9 @@ export default async function StoreSettingsPage({ params }) {
         initialIsOverride={pricing.isOverride}
         initialPricingMode={store.pricing_mode || 'legacy_markup'}
         initialFallbackMarkup={store.fallback_markup_percent !== null && store.fallback_markup_percent !== undefined ? Number(store.fallback_markup_percent) : null}
+        initialRules={initialRules}
+        initialCatRules={initialCatRules}
+        initialAvailableCategories={availableCategories}
       />
     </div>
   )

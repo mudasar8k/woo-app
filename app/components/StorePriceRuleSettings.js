@@ -14,6 +14,8 @@ export default function StorePriceRuleSettings({
   initialPricingMode = 'legacy_markup',
   initialFallbackMarkup = null,
   initialRules = [],
+  initialCatRules = [],
+  initialAvailableCategories = [],
 }) {
   const router = useRouter()
 
@@ -25,14 +27,15 @@ export default function StorePriceRuleSettings({
   const [isOverride, setIsOverride] = useState(Boolean(initialIsOverride))
 
   // ── Category Pricing Rules state ──────────────────────────────────────────
-  const [catRules, setCatRules] = useState([])
-  const [availableCategories, setAvailableCategories] = useState([])
-  const [catLoading, setCatLoading] = useState(true)
+  const [catRules, setCatRules] = useState(Array.isArray(initialCatRules) ? initialCatRules : [])
+  const [availableCategories, setAvailableCategories] = useState(Array.isArray(initialAvailableCategories) ? initialAvailableCategories : [])
+  const [catLoading, setCatLoading] = useState(false)
   const [catSaving, setCatSaving] = useState(false)
   const [catError, setCatError] = useState('')
   const [catSuccess, setCatSuccess] = useState('')
   const [newCatName, setNewCatName] = useState('')
   const [newCatMarkup, setNewCatMarkup] = useState('')
+
   // ── UI / Draft state ───────────────────────────────────────────────────────
   const [selectedMode, setSelectedMode] = useState(initialPricingMode)
   const [useLegacyOverride, setUseLegacyOverride] = useState(Boolean(initialIsOverride))
@@ -74,18 +77,18 @@ export default function StorePriceRuleSettings({
   const [showActivationModal, setShowActivationModal] = useState(false)
   const [showRollbackModal, setShowRollbackModal] = useState(false)
 
-  // Load existing rules from backend on mount
+  // Load existing rules from backend on mount (without resetting client state if already loaded from SSR)
   useEffect(() => {
     async function loadConfigAndRules() {
       try {
-        const [configRes, rulesRes] = await Promise.all([
-          fetch(`/api/stores/${storeId}/pricing-config`),
-          fetch(`/api/stores/${storeId}/pricing-rules`),
+        const [configRes, rulesRes, catRes] = await Promise.all([
+          fetch(`/api/stores/${storeId}/pricing-config`, { cache: 'no-store' }),
+          fetch(`/api/stores/${storeId}/pricing-rules`, { cache: 'no-store' }),
+          fetch(`/api/stores/${storeId}/category-rules`, { cache: 'no-store' }),
         ])
         if (configRes.ok) {
           const config = await configRes.json()
           setActivePricingMode(config.pricing_mode)
-          setSelectedMode(config.pricing_mode)
           setActiveOverride(config.price_rule_percent)
           setLegacyValue(config.price_rule_percent !== null ? String(config.price_rule_percent) : '')
           setActiveFallback(config.fallback_markup_percent)
@@ -98,6 +101,15 @@ export default function StorePriceRuleSettings({
           const rData = await rulesRes.json()
           if (Array.isArray(rData.rules) && rData.rules.length > 0) {
             setRules(rData.rules)
+          }
+        }
+        if (catRes.ok) {
+          const cData = await catRes.json()
+          if (Array.isArray(cData.rules)) {
+            setCatRules(cData.rules)
+          }
+          if (Array.isArray(cData.available_categories)) {
+            setAvailableCategories(cData.available_categories)
           }
         }
       } catch (err) {
@@ -121,7 +133,7 @@ export default function StorePriceRuleSettings({
     if (rules.length > 0) {
       const lastRule = rules[rules.length - 1]
       if (lastRule.max_cost === null) {
-        setError('Cannot add a rule after an open-ended rule (with no upper limit).')
+        setError('Cannot add a rule after an open-ended rule (with no upper limit). Uncheck No Upper Limit on the last rule first.')
         return
       }
       nextMin = Number(lastRule.max_cost) || 0
@@ -159,6 +171,97 @@ export default function StorePriceRuleSettings({
     updated[index] = updated[target]
     updated[target] = temp
     setRules(updated)
+  }
+
+  // ── Category Rule Handlers ────────────────────────────────────────────────
+  const handleAddCatRule = () => {
+    setCatError('')
+    setCatSuccess('')
+    const trimmed = (newCatName || '').trim()
+    const markupNum = parseFloat(newCatMarkup)
+    if (!trimmed) {
+      setCatError('Please select or type a valid category name.')
+      return
+    }
+    if (isNaN(markupNum) || markupNum < 0) {
+      setCatError('Markup % must be a non-negative number.')
+      return
+    }
+    if (catRules.some((r) => r.category.toLowerCase() === trimmed.toLowerCase())) {
+      setCatError(`A rule for category "${trimmed}" already exists.`)
+      return
+    }
+
+    const nextPriority = catRules.length > 0 ? Math.max(...catRules.map((r) => r.priority || 0)) + 1 : 1
+    const newRule = {
+      category: trimmed,
+      markup_percent: markupNum,
+      priority: nextPriority,
+      active: true,
+    }
+    setCatRules([...catRules, newRule])
+    setNewCatName('')
+    setNewCatMarkup('')
+  }
+
+  const handleUpdateCatRule = (index, field, value) => {
+    setCatError('')
+    setCatSuccess('')
+    const updated = [...catRules]
+    if (field === 'markup_percent') {
+      updated[index].markup_percent = value === '' ? '' : Number(value)
+    } else if (field === 'active') {
+      updated[index].active = Boolean(value)
+    } else if (field === 'category') {
+      updated[index].category = value
+    }
+    setCatRules(updated)
+  }
+
+  const handleDeleteCatRule = (index) => {
+    setCatError('')
+    setCatSuccess('')
+    setCatRules(catRules.filter((_, i) => i !== index))
+  }
+
+  const handleMoveCatRule = (index, direction) => {
+    setCatError('')
+    setCatSuccess('')
+    const target = index + direction
+    if (target < 0 || target >= catRules.length) return
+    const updated = [...catRules]
+    const temp = updated[index]
+    updated[index] = updated[target]
+    updated[target] = temp
+    // Re-index priorities to 1, 2, 3...
+    updated.forEach((r, i) => {
+      r.priority = i + 1
+    })
+    setCatRules(updated)
+  }
+
+  const handleSaveCategoryRules = async () => {
+    setCatSaving(true)
+    setCatError('')
+    setCatSuccess('')
+    try {
+      const res = await fetch(`/api/stores/${storeId}/category-rules`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rules: catRules }),
+      })
+      const data = await res.json()
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to save category rules')
+      }
+      setCatRules(data.rules)
+      setCatSuccess('Category pricing rules saved successfully.')
+      router.refresh()
+    } catch (err) {
+      setCatError(err.message)
+    } finally {
+      setCatSaving(false)
+    }
   }
 
   // ── Live Calculator ────────────────────────────────────────────────────────
@@ -200,6 +303,7 @@ export default function StorePriceRuleSettings({
           preview_sample: true,
           limit: 20,
           preview_rules: rules,
+          preview_category_rules: catRules,
           preview_fallback: fallbackValue === '' ? null : Number(fallbackValue),
         }),
       })
@@ -269,6 +373,7 @@ export default function StorePriceRuleSettings({
 
       setRules(data.rules)
       setSuccess('Price range rules saved successfully in draft.')
+      router.refresh()
     } catch (err) {
       setError(err.message)
     } finally {
@@ -298,18 +403,16 @@ export default function StorePriceRuleSettings({
         body: JSON.stringify({
           pricing_mode: 'range_rules',
           fallback_markup_percent: fallbackValue === '' ? null : Number(fallbackValue),
-          price_rule_percent: useLegacyOverride ? (legacyValue === '' ? null : Number(legacyValue)) : null,
         }),
       })
       const configData = await configRes.json()
-      if (!configRes.ok) {
-        throw new Error(configData.details ? configData.details.join(' ') : configData.error || 'Failed to activate tiered pricing')
-      }
+      if (!configRes.ok) throw new Error(configData.error || 'Failed to activate tiered pricing mode')
 
+      setRules(rulesData.rules)
       setActivePricingMode('range_rules')
       setSelectedMode('range_rules')
       setActiveFallback(configData.fallback_markup_percent)
-      setSuccess('Tiered Price Ranges are now ACTIVE for this store.')
+      setSuccess('Tiered Range Pricing activated successfully.')
       router.refresh()
     } catch (err) {
       setError(err.message)
@@ -498,19 +601,20 @@ export default function StorePriceRuleSettings({
               <label htmlFor="price_rule_percent" className="block text-sm font-medium text-gray-700 mb-1">
                 Store markup (%)
               </label>
-              <input
-                type="number"
-                step="0.01"
-                id="price_rule_percent"
-                value={legacyValue}
-                onChange={(e) => setLegacyValue(e.target.value)}
-                placeholder="e.g. 177"
-                disabled={loading}
-                className="w-full max-w-xs px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500"
-              />
-              <p className="text-xs text-gray-500 mt-1">
-                Markup on cost (e.g. 177 → sell at cost × 2.77).
-              </p>
+              <div className="flex items-center gap-2 max-w-xs">
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  id="price_rule_percent"
+                  value={legacyValue}
+                  onChange={(e) => setLegacyValue(e.target.value)}
+                  disabled={loading}
+                  placeholder="e.g. 177"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:ring-1 focus:ring-indigo-500"
+                />
+                <span className="text-gray-500 text-sm font-medium">%</span>
+              </div>
             </div>
           )}
 
@@ -518,85 +622,93 @@ export default function StorePriceRuleSettings({
             <button
               type="submit"
               disabled={loading}
-              className="px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-md hover:bg-indigo-700 disabled:opacity-50 transition"
+              className="px-4 py-2 bg-indigo-600 text-white text-sm font-semibold rounded-md hover:bg-indigo-700 disabled:opacity-50 transition"
             >
               {loading ? 'Saving...' : 'Save Single Markup'}
             </button>
-
             {activePricingMode === 'range_rules' && (
               <button
                 type="button"
                 onClick={() => setShowRollbackModal(true)}
                 disabled={loading}
-                className="px-4 py-2 bg-amber-600 text-white text-sm font-medium rounded-md hover:bg-amber-700 disabled:opacity-50 transition"
+                className="px-4 py-2 bg-amber-600 text-white text-sm font-semibold rounded-md hover:bg-amber-700 disabled:opacity-50 transition"
               >
-                Revert Store to Single Markup
+                Revert to Single Markup (+177%)
               </button>
             )}
           </div>
         </form>
       )}
 
-      {/* ── MODE B: Tiered Price Ranges Builder ────────────────────────────── */}
+      {/* ── MODE B: Tiered Price Ranges Section ────────────────────────────── */}
       {selectedMode === 'range_rules' && (
         <div className="space-y-6 pt-2">
-          {/* Validation Warnings / Error Banner */}
-          {!validation.valid && (
-            <div className="bg-red-50 border-l-4 border-red-500 p-4 rounded-r-md space-y-1">
-              <p className="text-sm font-bold text-red-800">Please correct the following range issues:</p>
-              <ul className="list-disc list-inside text-xs text-red-700 space-y-0.5">
-                {validation.errors.map((err, i) => (
-                  <li key={i}>{err}</li>
-                ))}
-              </ul>
-            </div>
-          )}
-
-          {/* Range Table */}
+          {/* Range Rules Table */}
           <div className="space-y-3">
-            <div className="flex items-center justify-between">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
               <div>
-                <h3 className="text-base font-semibold text-gray-900">Configured Price Ranges</h3>
+                <h3 className="text-sm font-semibold text-gray-900">Price Ranges & Markups</h3>
                 <p className="text-xs text-gray-500">
-                  Ranges evaluate deterministically: lower boundary is exclusive (min &lt; cost &le; max), except £0 which is inclusive.
+                  Products with supplier cost in each range will be marked up accordingly.
                 </p>
               </div>
               <button
                 type="button"
                 onClick={handleAddRule}
-                disabled={loading}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-md hover:bg-indigo-100 transition"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-indigo-50 text-indigo-700 text-xs font-semibold rounded border border-indigo-200 hover:bg-indigo-100 transition"
               >
-                + Add Price Range
+                <span>+</span> Add Price Range
               </button>
             </div>
 
+            {/* Validation Warnings */}
+            {!validation.valid && (
+              <div className="p-3 bg-red-50 border border-red-200 rounded text-xs text-red-700 space-y-1">
+                <strong>Validation Issues:</strong>
+                <ul className="list-disc pl-4 space-y-0.5">
+                  {validation.errors.map((err, i) => (
+                    <li key={i}>{err}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {validation.valid && validation.hasGaps && (
+              <div className="p-3 bg-amber-50 border border-amber-200 rounded text-xs text-amber-800 space-y-1">
+                <strong>Notice:</strong> Your ranges have gaps. Items falling in gaps will use the fallback markup (
+                {fallbackValue ? `+${fallbackValue}%` : 'None'}).
+              </div>
+            )}
+
             <div className="overflow-x-auto border border-gray-200 rounded-lg shadow-sm">
-              <table className="min-w-full divide-y divide-gray-200 text-sm">
-                <thead className="bg-gray-50 text-gray-700 text-xs font-semibold uppercase tracking-wider">
+              <table className="min-w-full divide-y divide-gray-200 text-xs">
+                <thead className="bg-gray-50 text-gray-700 font-semibold uppercase">
                   <tr>
-                    <th className="px-4 py-3 text-left">From (£ Cost)</th>
-                    <th className="px-4 py-3 text-left">To (£ Cost)</th>
-                    <th className="px-4 py-3 text-left">Markup %</th>
-                    <th className="px-4 py-3 text-left">Example (£10 Cost)</th>
+                    <th className="px-4 py-3 text-left w-12">#</th>
+                    <th className="px-4 py-3 text-left">Min Cost (£)</th>
+                    <th className="px-4 py-3 text-left">Max Cost (£)</th>
+                    <th className="px-4 py-3 text-left">Markup (%)</th>
+                    <th className="px-4 py-3 text-left">Example Calculation</th>
                     <th className="px-4 py-3 text-right">Actions</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-200 bg-white">
                   {rules.length === 0 ? (
                     <tr>
-                      <td colSpan={5} className="px-4 py-6 text-center text-gray-500 text-xs">
-                        No pricing ranges configured. Click "+ Add Price Range" to create your first band.
+                      <td colSpan={6} className="px-4 py-8 text-center text-gray-500">
+                        No price ranges defined. Click <strong>+ Add Price Range</strong> to create your first rule.
                       </td>
                     </tr>
                   ) : (
                     rules.map((rule, idx) => {
                       const isOpenEnded = rule.max_cost === null || rule.max_cost === undefined || rule.max_cost === ''
-                      const exampleCost = isOpenEnded ? (Number(rule.min_cost) || 0) + 10 : Number(rule.max_cost) || 10
-                      const examplePrice = round2(exampleCost * (1 + (Number(rule.markup_percent) || 0) / 100))
+                      const exampleCost = Number(rule.min_cost) > 0 ? Number(rule.min_cost) + 1 : 2.5
+                      const examplePrice = round2(exampleCost * (1 + Number(rule.markup_percent || 0) / 100))
 
                       return (
-                        <tr key={idx} className="hover:bg-gray-50/80 transition">
+                        <tr key={idx} className="hover:bg-gray-50/80">
+                          <td className="px-4 py-2.5 font-bold text-gray-400">{idx + 1}</td>
+
                           {/* Min Cost */}
                           <td className="px-4 py-2.5 whitespace-nowrap">
                             <div className="flex items-center gap-1">
@@ -748,12 +860,9 @@ export default function StorePriceRuleSettings({
                   type="number"
                   step="0.01"
                   value={calcCost}
-                  onChange={(e) => {
-                    setCalcCost(e.target.value)
-                    runCalculator(e.target.value)
-                  }}
+                  onChange={(e) => setCalcCost(e.target.value)}
                   placeholder="12.50"
-                  className="w-28 px-2.5 py-1 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-indigo-500"
+                  className="w-24 px-2 py-1 bg-white border border-indigo-200 rounded text-xs focus:ring-1 focus:ring-indigo-500"
                 />
               </div>
 
@@ -761,30 +870,36 @@ export default function StorePriceRuleSettings({
                 type="button"
                 onClick={() => runCalculator(calcCost)}
                 disabled={calcLoading}
-                className="px-3 py-1 bg-indigo-600 text-white text-xs font-medium rounded hover:bg-indigo-700 transition"
+                className="px-3 py-1 bg-indigo-600 text-white text-xs font-semibold rounded hover:bg-indigo-700 transition"
               >
                 {calcLoading ? 'Calculating...' : 'Calculate'}
               </button>
 
               {calcResult && (
-                <div className="flex items-center gap-2 pl-2 text-xs text-indigo-950 font-mono">
-                  <span>Markup: <strong>+{calcResult.applied_markup}%</strong></span>
-                  <span>•</span>
-                  <span>Selling Price: <strong className="text-indigo-700 text-sm">£{calcResult.selling_price?.toFixed(2)}</strong></span>
-                  <span>({calcResult.source})</span>
+                <div className="flex items-center gap-3 bg-white px-3 py-1 rounded border border-indigo-200 text-xs">
+                  <span>
+                    Selling Price:{' '}
+                    <strong className="text-indigo-700 text-sm font-bold">
+                      £{calcResult.selling_price?.toFixed(2)}
+                    </strong>
+                  </span>
+                  <span className="text-gray-400">|</span>
+                  <span className="text-gray-600">
+                    Markup: <strong>+{calcResult.applied_markup}%</strong> ({calcResult.source})
+                  </span>
                 </div>
               )}
             </div>
           </div>
 
-          {/* ── Action Buttons ────────────────────────────────────────────── */}
+          {/* ── Range Action Buttons ──────────────────────────────────────── */}
           <div className="flex flex-wrap items-center justify-between gap-3 pt-3 border-t border-gray-200">
             <div className="flex items-center gap-2">
               <button
                 type="button"
                 onClick={handleSaveRangeRules}
-                disabled={loading || !validation.valid}
-                className="px-4 py-2 bg-gray-800 text-white text-sm font-medium rounded-md hover:bg-gray-900 disabled:opacity-40 transition"
+                disabled={loading}
+                className="px-4 py-2 bg-gray-800 text-white text-sm font-semibold rounded-md hover:bg-gray-900 disabled:opacity-50 transition"
               >
                 {loading ? 'Saving...' : 'Save Pricing Rules (Draft)'}
               </button>
@@ -792,10 +907,10 @@ export default function StorePriceRuleSettings({
               <button
                 type="button"
                 onClick={handleOpenImpactPreview}
-                disabled={loading}
-                className="px-4 py-2 bg-white text-indigo-700 border border-indigo-300 text-sm font-medium rounded-md hover:bg-indigo-50 transition"
+                disabled={previewLoading || rules.length === 0}
+                className="px-4 py-2 bg-indigo-50 text-indigo-700 border border-indigo-200 text-sm font-semibold rounded-md hover:bg-indigo-100 disabled:opacity-50 transition"
               >
-                Preview Price Impact (20 SKUs)
+                Preview Catalog Impact (20 items)
               </button>
             </div>
 
@@ -805,7 +920,7 @@ export default function StorePriceRuleSettings({
                   type="button"
                   onClick={() => setShowRollbackModal(true)}
                   disabled={loading}
-                  className="px-4 py-2 bg-amber-600 text-white text-sm font-medium rounded-md hover:bg-amber-700 transition"
+                  className="px-4 py-2 bg-amber-600 text-white text-sm font-semibold rounded-md hover:bg-amber-700 disabled:opacity-50 transition"
                 >
                   Revert to Single Markup (+177%)
                 </button>
@@ -813,10 +928,10 @@ export default function StorePriceRuleSettings({
                 <button
                   type="button"
                   onClick={() => setShowActivationModal(true)}
-                  disabled={loading || !validation.valid}
-                  className="px-5 py-2 bg-emerald-600 text-white text-sm font-bold rounded-md hover:bg-emerald-700 disabled:opacity-40 shadow-sm transition"
+                  disabled={loading || !validation.valid || rules.length === 0}
+                  className="px-4 py-2 bg-emerald-600 text-white text-sm font-bold rounded-md hover:bg-emerald-700 disabled:opacity-50 transition shadow-sm"
                 >
-                  Activate Tiered Pricing
+                  Activate Tiered Pricing Now
                 </button>
               )}
             </div>
@@ -824,27 +939,205 @@ export default function StorePriceRuleSettings({
         </div>
       )}
 
+      {/* ── Category-Based Pricing Rules Section ───────────────────────────── */}
+      <div className="border-t border-gray-200 pt-6 space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+          <div>
+            <h3 className="text-sm font-semibold text-gray-900 flex items-center gap-2">
+              <span>🏷️</span> Category-Based Pricing Rules
+            </h3>
+            <p className="text-xs text-gray-500 mt-0.5">
+              Category rules override store price ranges for products matching specific categories. Lower priority number takes precedence.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={handleSaveCategoryRules}
+            disabled={catSaving}
+            className="px-3.5 py-1.5 bg-indigo-600 text-white text-xs font-semibold rounded hover:bg-indigo-700 disabled:opacity-50 transition"
+          >
+            {catSaving ? 'Saving...' : 'Save Category Rules'}
+          </button>
+        </div>
+
+        {catError && (
+          <div className="bg-red-50 border border-red-300 text-red-700 px-3 py-2 rounded text-xs">
+            {catError}
+          </div>
+        )}
+        {catSuccess && (
+          <div className="bg-emerald-50 border border-emerald-300 text-emerald-800 px-3 py-2 rounded text-xs font-medium">
+            {catSuccess}
+          </div>
+        )}
+
+        {/* Add New Category Rule Form */}
+        <div className="bg-gray-50 border border-gray-200 rounded-lg p-3 flex flex-wrap items-center gap-2.5 text-xs">
+          <span className="font-semibold text-gray-700">Add Category Rule:</span>
+          {availableCategories.length > 0 ? (
+            <select
+              value={newCatName}
+              onChange={(e) => setNewCatName(e.target.value)}
+              className="px-2.5 py-1.5 border border-gray-300 rounded bg-white text-gray-900 focus:ring-1 focus:ring-indigo-500"
+            >
+              <option value="">-- Select Category --</option>
+              {availableCategories
+                .filter((cat) => !catRules.some((r) => r.category.toLowerCase() === cat.toLowerCase()))
+                .map((cat, i) => (
+                  <option key={i} value={cat}>
+                    {cat}
+                  </option>
+                ))}
+            </select>
+          ) : (
+            <input
+              type="text"
+              placeholder="Category name (e.g. T-Shirts)"
+              value={newCatName}
+              onChange={(e) => setNewCatName(e.target.value)}
+              className="px-2.5 py-1.5 border border-gray-300 rounded bg-white text-gray-900 focus:ring-1 focus:ring-indigo-500 w-48"
+            />
+          )}
+
+          <div className="flex items-center gap-1">
+            <span className="text-gray-400">+</span>
+            <input
+              type="number"
+              step="0.01"
+              min="0"
+              placeholder="Markup %"
+              value={newCatMarkup}
+              onChange={(e) => setNewCatMarkup(e.target.value)}
+              className="w-24 px-2.5 py-1.5 border border-gray-300 rounded bg-white text-gray-900 focus:ring-1 focus:ring-indigo-500"
+            />
+            <span className="text-gray-400">%</span>
+          </div>
+
+          <button
+            type="button"
+            onClick={handleAddCatRule}
+            className="px-3 py-1.5 bg-gray-800 text-white font-semibold rounded hover:bg-gray-900 transition"
+          >
+            Add Rule
+          </button>
+        </div>
+
+        {/* Category Rules Table */}
+        <div className="overflow-x-auto border border-gray-200 rounded-lg">
+          <table className="min-w-full divide-y divide-gray-200 text-xs">
+            <thead className="bg-gray-50 text-gray-700 font-semibold uppercase">
+              <tr>
+                <th className="px-3 py-2.5 text-left w-16">Priority</th>
+                <th className="px-3 py-2.5 text-left">Category</th>
+                <th className="px-3 py-2.5 text-left">Markup (%)</th>
+                <th className="px-3 py-2.5 text-center">Status</th>
+                <th className="px-3 py-2.5 text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-200 bg-white">
+              {catRules.length === 0 ? (
+                <tr>
+                  <td colSpan={5} className="px-4 py-6 text-center text-gray-500">
+                    No category-specific pricing rules defined. Products without category rules inherit store price ranges.
+                  </td>
+                </tr>
+              ) : (
+                catRules.map((rule, idx) => (
+                  <tr key={idx} className="hover:bg-gray-50">
+                    <td className="px-3 py-2 text-gray-500 font-bold">
+                      <span className="inline-flex items-center justify-center h-5 w-5 rounded-full bg-indigo-100 text-indigo-800 text-[11px]">
+                        {idx + 1}
+                      </span>
+                    </td>
+                    <td className="px-3 py-2 font-medium text-gray-900">
+                      {rule.category}
+                    </td>
+                    <td className="px-3 py-2 whitespace-nowrap">
+                      <div className="flex items-center gap-1">
+                        <span className="text-gray-400">+</span>
+                        <input
+                          type="number"
+                          step="0.01"
+                          min="0"
+                          value={rule.markup_percent}
+                          onChange={(e) => handleUpdateCatRule(idx, 'markup_percent', e.target.value)}
+                          className="w-20 px-2 py-1 border border-gray-300 rounded text-xs focus:ring-1 focus:ring-indigo-500"
+                        />
+                        <span className="text-gray-400">%</span>
+                      </div>
+                    </td>
+                    <td className="px-3 py-2 text-center">
+                      <label className="inline-flex items-center cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={rule.active !== false}
+                          onChange={(e) => handleUpdateCatRule(idx, 'active', e.target.checked)}
+                          className="h-3.5 w-3.5 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                        />
+                        <span className="ml-1.5 text-[11px] text-gray-600">
+                          {rule.active !== false ? 'Active' : 'Disabled'}
+                        </span>
+                      </label>
+                    </td>
+                    <td className="px-3 py-2 text-right whitespace-nowrap">
+                      <div className="inline-flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() => handleMoveCatRule(idx, -1)}
+                          disabled={idx === 0}
+                          title="Move Higher Priority"
+                          className="p-1 text-gray-400 hover:text-gray-700 disabled:opacity-30 text-xs"
+                        >
+                          ▲
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleMoveCatRule(idx, 1)}
+                          disabled={idx === catRules.length - 1}
+                          title="Move Lower Priority"
+                          className="p-1 text-gray-400 hover:text-gray-700 disabled:opacity-30 text-xs"
+                        >
+                          ▼
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteCatRule(idx)}
+                          title="Delete Category Rule"
+                          className="p-1 text-red-500 hover:text-red-700 ml-1 text-xs"
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
       {/* ── IMPACT PREVIEW MODAL ───────────────────────────────────────────── */}
       {showPreviewModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
           <div className="bg-white rounded-xl shadow-2xl max-w-4xl w-full max-h-[90vh] flex flex-col">
-            <div className="p-5 border-b border-gray-200 flex items-center justify-between">
+            <div className="p-4 border-b border-gray-200 flex items-center justify-between">
               <div>
-                <h3 className="text-lg font-bold text-gray-900">Price Impact Preview</h3>
+                <h3 className="text-base font-bold text-gray-900">Catalog Impact Preview (Sample 20 Items)</h3>
                 <p className="text-xs text-gray-500">
-                  Read-only comparison of current active selling price vs proposed tiered price across representative products.
+                  Comparing current active selling price vs proposed draft price
                 </p>
               </div>
               <button
                 type="button"
                 onClick={() => setShowPreviewModal(false)}
-                className="text-gray-400 hover:text-gray-700 text-lg font-bold p-1"
+                className="text-gray-400 hover:text-gray-600 text-lg font-bold"
               >
                 ✕
               </button>
             </div>
 
-            <div className="p-5 overflow-y-auto flex-1 space-y-4">
+            <div className="p-4 overflow-y-auto flex-1">
               {previewLoading ? (
                 <div className="py-12 text-center text-sm text-gray-500">
                   Calculating catalog impact...

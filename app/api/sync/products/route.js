@@ -8,6 +8,7 @@ import {
   resolveItemPrice,
   loadStorePricingEngine,
   loadProductStoreOverrides,
+  loadVariationStoreOverrides,
 } from '../../../lib/pricing'
 import { getStorePricingContext } from '../../../lib/app-settings'
 
@@ -451,7 +452,8 @@ export async function POST(request) {
               }
 
               const varCost = resolveCostPrice(variation)
-              const sellPrice = resolveItemPrice(varCost, storeContext, rangeRules, productOverride, product.categories, categoryRules).sellingPrice
+              const varOverride = (await loadVariationStoreOverrides(db, store_id, [variation.id])).get(variation.id) || null
+              const sellPrice = resolveItemPrice(varCost, storeContext, rangeRules, productOverride, product.categories, categoryRules, varOverride).sellingPrice
               const wooVariationData = {
                 sku: variation.sku || undefined,
                 regular_price: sellPrice !== null ? sellPrice.toString() : '',

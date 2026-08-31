@@ -990,7 +990,63 @@ export default function ProductReview({
                                           {formatMoney(resolveCostPrice(variant))}
                                         </td>
                                         <td className="px-4 py-2 text-sm text-gray-900 font-medium">
-                                          {formatMoney(resolveStorePrice(variant, storePricing))}
+                                          <div>
+                                            <span className="font-bold">
+                                              {variant.store_price !== null && variant.store_price !== undefined
+                                                ? formatMoney(variant.store_price)
+                                                : formatMoney(
+                                                    resolveStorePrice(
+                                                      variant,
+                                                      storePricingContext || storePricing,
+                                                      null,
+                                                      product.override_type
+                                                        ? {
+                                                            override_type: product.override_type,
+                                                            custom_markup_percent: product.custom_markup_percent,
+                                                            fixed_price: product.fixed_price,
+                                                          }
+                                                        : null,
+                                                      rangeRules,
+                                                      product.categories,
+                                                      categoryRules,
+                                                      variant.override
+                                                    )
+                                                  )}
+                                            </span>
+                                            {variant.price_source === 'variation_custom_markup' ? (
+                                              <span className="block text-[10px] text-purple-700 font-semibold">
+                                                Variation Markup (+{variant.applied_markup}%)
+                                              </span>
+                                            ) : variant.price_source === 'variation_fixed' ? (
+                                              <span className="block text-[10px] text-emerald-700 font-semibold">
+                                                Variation Fixed
+                                              </span>
+                                            ) : variant.price_source === 'product_custom_markup' ? (
+                                              <span className="block text-[10px] text-purple-600 font-medium">
+                                                Product Markup (+{variant.applied_markup}%)
+                                              </span>
+                                            ) : variant.price_source === 'product_fixed' ? (
+                                              <span className="block text-[10px] text-emerald-600 font-medium">
+                                                Product Fixed
+                                              </span>
+                                            ) : variant.price_source === 'category_rule' ? (
+                                              <span className="block text-[10px] text-indigo-600 font-medium">
+                                                Cat: {variant.matched_category} (+{variant.applied_markup}%)
+                                              </span>
+                                            ) : variant.price_source === 'range_rule' ? (
+                                              <span className="block text-[10px] text-gray-500 font-normal">
+                                                Range Rule (+{variant.applied_markup}%)
+                                              </span>
+                                            ) : variant.price_source === 'store_fallback_markup' ? (
+                                              <span className="block text-[10px] text-amber-600 font-medium">
+                                                Fallback (+{variant.applied_markup}%)
+                                              </span>
+                                            ) : variant.price_source ? (
+                                              <span className="block text-[10px] text-gray-400 font-normal">
+                                                {String(variant.price_source).replace(/_/g, ' ')}
+                                              </span>
+                                            ) : null}
+                                          </div>
                                         </td>
                                         <td className="px-4 py-2 text-sm text-gray-500">
                                           {variant.stock_status || '-'}

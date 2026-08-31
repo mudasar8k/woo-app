@@ -8,6 +8,7 @@ import {
   resolveItemPrice,
   loadStorePricingEngine,
   loadProductStoreOverrides,
+  loadProductVariationStoreOverrides,
 } from '../../../../lib/pricing'
 import { getStorePricingContext } from '../../../../lib/app-settings'
 
@@ -534,6 +535,7 @@ export async function POST(request, { params }) {
         const batchVariationMap = new Map() // index -> variation database id
         
         let skippedCount = 0
+        const varOverridesMap = await loadProductVariationStoreOverrides(db, store_id, productId)
         for (let i = 0; i < variations.length; i++) {
           const variation = variations[i]
           try {
@@ -614,7 +616,8 @@ export async function POST(request, { params }) {
             }
 
             const varCost = resolveCostPrice(variation)
-            const sellPrice = resolveItemPrice(varCost, storeContext, rangeRules, productOverride, product.categories, categoryRules).sellingPrice
+            const varOverride = varOverridesMap.get(variation.id) || null
+            const sellPrice = resolveItemPrice(varCost, storeContext, rangeRules, productOverride, product.categories, categoryRules, varOverride).sellingPrice
             const wooVariationData = {
               sku: variation.sku || undefined,
               regular_price: sellPrice !== null ? sellPrice.toString() : '',

@@ -9,11 +9,11 @@ export default async function ProductsPage({ params, searchParams }) {
   const session = await requireAdmin()
   const { id } = await params
   const resolvedSearchParams = await searchParams
-  const storeId = parseInt(id)
+  const storeId = parseInt(id, 10)
   const isStoreAdmin = session.user.role === 'admin'
   const status = resolvedSearchParams?.status || (isStoreAdmin ? 'all' : 'pending')
-  const page = parseInt(resolvedSearchParams?.page || '1')
-  const limit = parseInt(resolvedSearchParams?.limit || '50')
+  const page = parseInt(resolvedSearchParams?.page || '1', 10)
+  const limit = parseInt(resolvedSearchParams?.limit || '50', 10)
   const search = resolvedSearchParams?.search || ''
   const brand = resolvedSearchParams?.brand || ''
   const category = resolvedSearchParams?.category || ''
@@ -51,7 +51,7 @@ export default async function ProductsPage({ params, searchParams }) {
   const pricing = await getStorePricingContext(store)
   const vendorJoin = isStoreAdmin ? VENDOR_STORE_JOIN : ''
 
-    // Fetch active range rules
+  // Fetch active range rules
   let rangeRules = []
   try {
     const rulesRes = await db.query(
@@ -148,10 +148,17 @@ export default async function ProductsPage({ params, searchParams }) {
               ven.name AS vendor_name,
               psp.override_type,
               psp.custom_markup_percent,
-              psp.fixed_price
+              psp.fixed_price,
+              COALESCE(vsp.variation_override_count, 0)::int AS variation_override_count
        FROM products p
        LEFT JOIN product_stores ps ON ps.product_id = p.id AND ps.store_id = $1
        LEFT JOIN product_store_pricing psp ON psp.product_id = p.id AND psp.store_id = $1
+       LEFT JOIN (
+         SELECT product_id, store_id, COUNT(*) AS variation_override_count
+         FROM variation_store_pricing
+         WHERE override_type IN ('custom_markup', 'fixed_price')
+         GROUP BY product_id, store_id
+       ) vsp ON vsp.product_id = p.id AND vsp.store_id = $1
        LEFT JOIN vendors ven ON ven.id = p.vendor_id
        ${vendorJoin}
        LEFT JOIN (
@@ -168,7 +175,7 @@ export default async function ProductsPage({ params, searchParams }) {
       queryParams
     )
   } catch {
-    // Fallback if product_store_pricing table is not yet migrated
+    // Fallback if pricing tables are not yet present
     productsResult = await db.query(
       `SELECT p.id, p.sku, p.name, p.price, p.regular_price, p.sale_price, p.stock_quantity,
               p.status, p.created_at, p.reviewed_at, p.brand, p.categories, p.images, ps.woo_product_id,
@@ -176,7 +183,8 @@ export default async function ProductsPage({ params, searchParams }) {
               COALESCE(v.variant_count, 0) as variant_count,
               v.min_cost_price,
               v.first_variant_image,
-              ven.name AS vendor_name
+              ven.name AS vendor_name,
+              0 AS variation_override_count
        FROM products p
        LEFT JOIN product_stores ps ON ps.product_id = p.id AND ps.store_id = $1
        LEFT JOIN vendors ven ON ven.id = p.vendor_id
@@ -212,7 +220,7 @@ export default async function ProductsPage({ params, searchParams }) {
     countParams
   )
 
-  const total = parseInt(countResult.rows[0].total)
+  const total = parseInt(countResult.rows[0].total, 10)
   const totalPages = Math.ceil(total / limit)
 
   const brandsResult = await db.query(
@@ -247,11 +255,25 @@ export default async function ProductsPage({ params, searchParams }) {
 
   const storePricingContext = {
     pricing_mode: store.pricing_mode || 'legacy_markup',
-    price_rule_percent: pricing.override,
-    fallback_markup_percent: store.fallback_markup_percent ? Number(store.fallback_markup_percent) : null,
-    default_price_rule_percent: pricing.defaultPercent,
-    defaultPercent: pricing.defaultPercent,
+    price_rule_percent: pricing.override !== null && pricing.override !== undefined ? Number(pricing.override) : null,
+    fallback_markup_percent: store.fallback_markup_percent !== null && store.fallback_markup_percent !== undefined ? Number(store.fallback_markup_percent) : null,
+    default_price_rule_percent: pricing.defaultPercent !== null && pricing.defaultPercent !== undefined ? Number(pricing.defaultPercent) : null,
+    defaultPercent: pricing.defaultPercent !== null && pricing.defaultPercent !== undefined ? Number(pricing.defaultPercent) : null,
   }
+
+  // Normalize product rows to guarantee serialization safety across Server Component boundary
+  const normalizedProducts = productsResult.rows.map((row) => ({
+    ...row,
+    id: Number(row.id),
+    variant_count: Number(row.variant_count || 0),
+    min_cost_price: row.min_cost_price !== null && row.min_cost_price !== undefined ? Number(row.min_cost_price) : null,
+    custom_markup_percent: row.custom_markup_percent !== null && row.custom_markup_percent !== undefined ? Number(row.custom_markup_percent) : null,
+    fixed_price: row.fixed_price !== null && row.fixed_price !== undefined ? Number(row.fixed_price) : null,
+    variation_override_count: Number(row.variation_override_count || 0),
+    created_at: row.created_at ? new Date(row.created_at).toISOString() : null,
+    reviewed_at: row.reviewed_at ? new Date(row.reviewed_at).toISOString() : null,
+    removed_at: row.removed_at ? new Date(row.removed_at).toISOString() : null,
+  }))
 
   return (
     <div>
@@ -279,7 +301,7 @@ export default async function ProductsPage({ params, searchParams }) {
         storePricingContext={storePricingContext}
         rangeRules={rangeRules}
         categoryRules={categoryRules}
-        products={enrichedProducts}
+        products={normalizedProducts}
         status={status}
         currentPage={page}
         totalPages={totalPages}

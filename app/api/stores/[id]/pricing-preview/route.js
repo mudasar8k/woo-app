@@ -296,13 +296,32 @@ export async function POST(request, { params }) {
     }
 
     const product = prodRes.rows[0]
-    const [overridesMap, varOverridesMap] = await Promise.all([
+    const [overridesMap, varOverridesMap, varRes] = await Promise.all([
       loadProductStoreOverrides(db, storeId, [productId]),
       loadProductVariationStoreOverrides(db, storeId, productId),
+      db.query(
+        `SELECT id, sku, price, regular_price, sale_price, size, color
+         FROM product_variations
+         WHERE product_id = $1
+         ORDER BY id ASC`,
+        [productId]
+      ),
     ])
     const productOverride = overridesMap.get(productId) || null
 
-    const parentCost = resolveCostPrice(product)
+    // Determine representative parent supplier cost:
+    // 1. Direct parent price / regular_price
+    // 2. Minimum variation cost across child variations (for variable products)
+    let parentCost = resolveCostPrice(product)
+    if ((parentCost === null || parentCost === 0) && varRes.rows.length > 0) {
+      const validCosts = varRes.rows
+        .map((v) => resolveCostPrice(v))
+        .filter((c) => c !== null && c > 0)
+      if (validCosts.length > 0) {
+        parentCost = Math.min(...validCosts)
+      }
+    }
+
     const parentCalc = resolveItemPrice(
       parentCost,
       storeContext,
@@ -310,14 +329,6 @@ export async function POST(request, { params }) {
       productOverride,
       product.categories,
       savedCategoryRules
-    )
-
-    const varRes = await db.query(
-      `SELECT id, sku, price, regular_price, sale_price, size, color
-       FROM product_variations
-       WHERE product_id = $1
-       ORDER BY created_at ASC`,
-      [productId]
     )
 
     const variationsPreview = varRes.rows.map((v) => {

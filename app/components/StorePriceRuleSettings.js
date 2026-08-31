@@ -370,8 +370,10 @@ export default function StorePriceRuleSettings({
           fallback_markup_percent: fallbackValue === '' ? null : Number(fallbackValue),
         }),
       })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error || 'Failed to save single markup')
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        throw new Error(data.details ? data.details.join(' ') : data.error || `Failed to save single markup (Status ${res.status})`)
+      }
 
       setActivePricingMode('legacy_markup')
       setSelectedMode('legacy_markup')
@@ -380,7 +382,7 @@ export default function StorePriceRuleSettings({
       setSuccess('Single markup saved successfully.')
       router.refresh()
     } catch (err) {
-      setError(err.message)
+      setError(err.message || 'Unable to save single markup.')
     } finally {
       setLoading(false)
     }
@@ -400,16 +402,16 @@ export default function StorePriceRuleSettings({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ rules }),
       })
-      const data = await res.json()
+      const data = await res.json().catch(() => ({}))
       if (!res.ok) {
-        throw new Error(data.details ? data.details.join(' ') : data.error || 'Failed to save pricing rules')
+        throw new Error(data.details ? data.details.join(' ') : data.error || `Failed to save pricing rules (Status ${res.status})`)
       }
 
-      setRules(data.rules)
+      setRules(data.rules || rules)
       setSuccess('Price range rules saved successfully in draft.')
       router.refresh()
     } catch (err) {
-      setError(err.message)
+      setError(err.message || 'Unable to save pricing rules.')
     } finally {
       setLoading(false)
     }
@@ -421,16 +423,18 @@ export default function StorePriceRuleSettings({
     setError('')
     setSuccess('')
     try {
+      // 1. Save rules first
       const rulesRes = await fetch(`/api/stores/${storeId}/pricing-rules`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ rules }),
       })
-      const rulesData = await rulesRes.json()
+      const rulesData = await rulesRes.json().catch(() => ({}))
       if (!rulesRes.ok) {
-        throw new Error(rulesData.details ? rulesData.details.join(' ') : rulesData.error || 'Failed to save rules before activation')
+        throw new Error(rulesData.details ? rulesData.details.join(' ') : rulesData.error || `Failed to save rules before activation (Status ${rulesRes.status})`)
       }
 
+      // 2. Activate mode
       const configRes = await fetch(`/api/stores/${storeId}/pricing-config`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -439,17 +443,19 @@ export default function StorePriceRuleSettings({
           fallback_markup_percent: fallbackValue === '' ? null : Number(fallbackValue),
         }),
       })
-      const configData = await configRes.json()
-      if (!configRes.ok) throw new Error(configData.error || 'Failed to activate tiered pricing mode')
+      const configData = await configRes.json().catch(() => ({}))
+      if (!configRes.ok) {
+        throw new Error(configData.details ? configData.details.join(' ') : configData.error || `Failed to activate tiered pricing mode (Status ${configRes.status})`)
+      }
 
-      setRules(rulesData.rules)
+      setRules(rulesData.rules || rules)
       setActivePricingMode('range_rules')
       setSelectedMode('range_rules')
       setActiveFallback(configData.fallback_markup_percent)
       setSuccess('Tiered Range Pricing activated successfully.')
       router.refresh()
     } catch (err) {
-      setError(err.message)
+      setError(err.message || 'Unable to activate tiered pricing.')
     } finally {
       setLoading(false)
     }
@@ -470,8 +476,10 @@ export default function StorePriceRuleSettings({
           fallback_markup_percent: fallbackValue === '' ? null : Number(fallbackValue),
         }),
       })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error || 'Failed to revert pricing mode')
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        throw new Error(data.details ? data.details.join(' ') : data.error || `Failed to revert pricing mode (Status ${res.status})`)
+      }
 
       setActivePricingMode('legacy_markup')
       setSelectedMode('legacy_markup')
@@ -480,7 +488,7 @@ export default function StorePriceRuleSettings({
       setSuccess('Reverted to Single Markup (+177%). Tiered rules remain saved for future activation.')
       router.refresh()
     } catch (err) {
-      setError(err.message)
+      setError(err.message || 'Unable to revert pricing mode.')
     } finally {
       setLoading(false)
     }

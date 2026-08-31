@@ -16,11 +16,11 @@ export default function ProductPriceOverrideModal({
   const [fixedPrice, setFixedPrice] = useState('')
   const [loading, setLoading] = useState(false)
   const [fetchingOverride, setFetchingOverride] = useState(false)
-  const [previewLoading, setPreviewLoading] = useState(false)
   const [previewData, setPreviewData] = useState(null)
   const [error, setError] = useState('')
   const [showConfirm, setShowConfirm] = useState(false)
   const [confirmAction, setConfirmAction] = useState(null)
+  const [showVariationModal, setShowVariationModal] = useState(false)
 
   // Fetch current override and preview when modal opens
   useEffect(() => {
@@ -28,6 +28,7 @@ export default function ProductPriceOverrideModal({
 
     setError('')
     setShowConfirm(false)
+    setShowVariationModal(false)
     setFetchingOverride(true)
 
     async function loadData() {
@@ -42,15 +43,23 @@ export default function ProductPriceOverrideModal({
         ])
 
         if (overrideRes.ok) {
-          const oData = await overrideRes.json()
+          const oData = await overrideRes.json().catch(() => ({}))
           const ov = oData.override || {}
           setOverrideType(ov.override_type || 'store_rules')
-          setCustomMarkup(ov.custom_markup_percent !== null && ov.custom_markup_percent !== undefined ? String(ov.custom_markup_percent) : '')
-          setFixedPrice(ov.fixed_price !== null && ov.fixed_price !== undefined ? String(ov.fixed_price) : '')
+          setCustomMarkup(
+            ov.custom_markup_percent !== null && ov.custom_markup_percent !== undefined
+              ? String(ov.custom_markup_percent)
+              : ''
+          )
+          setFixedPrice(
+            ov.fixed_price !== null && ov.fixed_price !== undefined
+              ? String(ov.fixed_price)
+              : ''
+          )
         }
 
         if (previewRes.ok) {
-          const pData = await previewRes.json()
+          const pData = await previewRes.json().catch(() => ({}))
           setPreviewData(pData)
         }
       } catch (err) {
@@ -66,9 +75,17 @@ export default function ProductPriceOverrideModal({
 
   if (!isOpen || !product) return null
 
-  const supplierCost = previewData?.product?.supplier_cost ?? Number(product.min_cost_price || product.price || 0)
-  const currentSellingPrice = previewData?.product?.selling_price ?? null
-  const currentSource = previewData?.product?.source ?? 'Store rules'
+  const supplierCost =
+    previewData?.product?.supplier_cost !== null && previewData?.product?.supplier_cost !== undefined
+      ? Number(previewData.product.supplier_cost)
+      : Number(product.min_cost_price || product.price || 0)
+
+  const currentSellingPrice =
+    previewData?.product?.selling_price !== null && previewData?.product?.selling_price !== undefined
+      ? Number(previewData.product.selling_price)
+      : null
+
+  const currentSource = previewData?.product?.source || 'Store rules'
 
   // Calculate local proposed selling price for parent item
   let proposedSellingPrice = null
@@ -76,13 +93,20 @@ export default function ProductPriceOverrideModal({
     proposedSellingPrice = fixedPrice !== '' && !isNaN(fixedPrice) ? Number(fixedPrice) : null
   } else if (overrideType === 'custom_markup') {
     const markupNum = customMarkup !== '' && !isNaN(customMarkup) ? Number(customMarkup) : null
-    proposedSellingPrice = markupNum !== null ? round2(supplierCost * (1 + markupNum / 100)) : null
+    proposedSellingPrice = markupNum !== null && !isNaN(supplierCost) ? round2(supplierCost * (1 + markupNum / 100)) : null
   } else {
     proposedSellingPrice = currentSellingPrice
   }
 
-  const diffAmount = currentSellingPrice !== null && proposedSellingPrice !== null ? round2(proposedSellingPrice - currentSellingPrice) : 0
-  const diffPercent = currentSellingPrice && currentSellingPrice > 0 ? round2(((proposedSellingPrice - currentSellingPrice) / currentSellingPrice) * 100) : 0
+  const diffAmount =
+    currentSellingPrice !== null && proposedSellingPrice !== null && !isNaN(currentSellingPrice) && !isNaN(proposedSellingPrice)
+      ? round2(proposedSellingPrice - currentSellingPrice)
+      : 0
+
+  const diffPercent =
+    currentSellingPrice && currentSellingPrice > 0 && proposedSellingPrice !== null && !isNaN(proposedSellingPrice)
+      ? round2(((proposedSellingPrice - currentSellingPrice) / currentSellingPrice) * 100)
+      : 0
 
   const handleSaveClick = (e) => {
     e.preventDefault()
@@ -135,7 +159,7 @@ export default function ProductPriceOverrideModal({
         body: JSON.stringify(bodyPayload),
       })
 
-      const data = await res.json()
+      const data = await res.json().catch(() => ({}))
       if (!res.ok) {
         throw new Error(data.error || 'Failed to save pricing override')
       }
@@ -143,7 +167,7 @@ export default function ProductPriceOverrideModal({
       if (onSaved) onSaved(data.override)
       onClose()
     } catch (err) {
-      setError(err.message)
+      setError(err.message || 'Failed to save pricing override')
     } finally {
       setLoading(false)
     }
@@ -158,7 +182,8 @@ export default function ProductPriceOverrideModal({
       const res = await fetch(`/api/products/${product.id}/store-pricing?store_id=${storeId}`, {
         method: 'DELETE',
       })
-      const data = await res.json()
+
+      const data = await res.json().catch(() => ({}))
       if (!res.ok) {
         throw new Error(data.error || 'Failed to reset pricing override')
       }
@@ -166,7 +191,7 @@ export default function ProductPriceOverrideModal({
       if (onSaved) onSaved({ override_type: 'store_rules', custom_markup_percent: null, fixed_price: null })
       onClose()
     } catch (err) {
-      setError(err.message)
+      setError(err.message || 'Failed to reset pricing override')
     } finally {
       setLoading(false)
     }
@@ -175,7 +200,12 @@ export default function ProductPriceOverrideModal({
   const variations = previewData?.variations || []
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose()
+      }}
+    >
       <div className="bg-white rounded-xl shadow-2xl max-w-2xl w-full max-h-[92vh] flex flex-col overflow-hidden">
         {/* ── Modal Header ───────────────────────────────────────────────── */}
         <div className="p-5 border-b border-gray-200 flex items-center justify-between bg-gray-50">
@@ -233,7 +263,7 @@ export default function ProductPriceOverrideModal({
                 <div>
                   <span className="text-gray-500 block">Current Source</span>
                   <span className="font-medium text-gray-800 capitalize truncate block">
-                    {currentSource.replace(/_/g, ' ')}
+                    {String(currentSource).replace(/_/g, ' ')}
                   </span>
                 </div>
               </div>
@@ -241,7 +271,7 @@ export default function ProductPriceOverrideModal({
               {/* Pricing Priority Hierarchy Notice */}
               <div className="text-[11px] text-gray-500 bg-indigo-50/60 border border-indigo-100 rounded-md p-2 flex items-center justify-between">
                 <span>
-                  <strong>Priority Engine:</strong> Fixed Price &gt; Custom Markup &gt; Store Tiered Rules &gt; Store Default
+                  <strong>Priority Engine:</strong> Variation &gt; Product Fixed &gt; Product Markup &gt; Category &gt; Tiered Ranges &gt; Store Default
                 </span>
               </div>
 
@@ -378,7 +408,7 @@ export default function ProductPriceOverrideModal({
                   </div>
                   <div className="font-mono font-semibold">
                     <span className={diffAmount > 0 ? 'text-emerald-700' : diffAmount < 0 ? 'text-rose-700' : 'text-gray-500'}>
-                      {diffAmount > 0 ? `+£${diffAmount.toFixed(2)}` : `£${diffAmount.toFixed(2)}`}
+                      {diffAmount > 0 ? `+£${Number(diffAmount).toFixed(2)}` : `£${Number(diffAmount).toFixed(2)}`}
                       {' '}({diffPercent > 0 ? `+${diffPercent}%` : `${diffPercent}%`})
                     </span>
                   </div>
@@ -445,6 +475,15 @@ export default function ProductPriceOverrideModal({
                       Showing first 15 of {variations.length} variations
                     </p>
                   )}
+                  <div className="pt-2 flex items-center justify-end">
+                    <button
+                      type="button"
+                      onClick={() => setShowVariationModal(true)}
+                      className="px-3 py-1.5 text-xs font-bold text-indigo-700 bg-indigo-50 border border-indigo-200 rounded-md hover:bg-indigo-100 transition flex items-center gap-1.5 shadow-sm"
+                    >
+                      <span>⚡</span> Manage Variation Overrides ({variations.length})
+                    </button>
+                  </div>
                 </div>
               )}
             </>
@@ -454,7 +493,7 @@ export default function ProductPriceOverrideModal({
         {/* ── Modal Footer / Actions ─────────────────────────────────────── */}
         <div className="p-4 border-t border-gray-200 bg-gray-50 flex items-center justify-between">
           <div>
-            {previewData?.product?.override?.override_type !== 'store_rules' && (
+            {previewData?.product?.override && previewData.product.override.override_type !== 'store_rules' && (
               <button
                 type="button"
                 onClick={handleResetClick}
@@ -514,7 +553,7 @@ export default function ProductPriceOverrideModal({
                 : overrideType === 'custom_markup'
                 ? `Apply +${customMarkup}% custom markup to ${product.sku || product.name}? Each variation will be marked up individually.`
                 : overrideType === 'fixed_price'
-                ? `Set ${product.sku || product.name} to a fixed price of £${Number(fixedPrice).toFixed(2)}? All variations will use this price.`
+                ? `Set ${product.sku || product.name} to a fixed price of £${Number(fixedPrice || 0).toFixed(2)}? All variations will use this price.`
                 : `Apply store default pricing to ${product.sku || product.name}?`}
             </p>
             <div className="flex items-center justify-end gap-2 pt-2">

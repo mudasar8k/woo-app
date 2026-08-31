@@ -115,7 +115,7 @@ export async function POST(request, { params }) {
       const prodsRes = await db.query(
         `SELECT p.id, p.sku, p.name, p.categories, p.price, p.regular_price
          FROM products p
-         JOIN product_stores ps ON ps.product_id = p.id AND ps.store_id = $1
+         LEFT JOIN product_stores ps ON ps.product_id = p.id AND ps.store_id = $1
          WHERE ps.store_id = $1
            AND (ps.status IS NULL OR ps.status NOT IN ('removed', 'rejected'))
            AND (p.status IS NULL OR p.status != 'rejected')

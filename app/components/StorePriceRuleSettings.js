@@ -77,7 +77,26 @@ export default function StorePriceRuleSettings({
   const [showActivationModal, setShowActivationModal] = useState(false)
   const [showRollbackModal, setShowRollbackModal] = useState(false)
 
-  // Load existing rules from backend on mount (without resetting client state if already loaded from SSR)
+  // Sync state if server-rendered props change (e.g. from router.refresh or page navigation)
+  useEffect(() => {
+    if (Array.isArray(initialRules) && initialRules.length > 0) {
+      setRules(initialRules)
+    }
+  }, [initialRules])
+
+  useEffect(() => {
+    if (Array.isArray(initialCatRules)) {
+      setCatRules(initialCatRules)
+    }
+  }, [initialCatRules])
+
+  useEffect(() => {
+    if (Array.isArray(initialAvailableCategories)) {
+      setAvailableCategories(initialAvailableCategories)
+    }
+  }, [initialAvailableCategories])
+
+  // Load existing rules from backend on mount
   useEffect(() => {
     async function loadConfigAndRules() {
       try {
@@ -125,55 +144,67 @@ export default function StorePriceRuleSettings({
     requireContinuous: selectedMode === 'range_rules',
   })
 
-  // ── Rule Row Mutations (Draft state) ───────────────────────────────────────
+  // ── Rule Row Mutations (Draft state with immutable functional updaters) ───
   const handleAddRule = () => {
     setError('')
     setSuccess('')
-    let nextMin = 0
-    if (rules.length > 0) {
-      const lastRule = rules[rules.length - 1]
-      if (lastRule.max_cost === null) {
-        setError('Cannot add a rule after an open-ended rule (with no upper limit). Uncheck No Upper Limit on the last rule first.')
-        return
+    setRules((prevRules) => {
+      let nextMin = 0
+      if (prevRules.length > 0) {
+        const lastRule = prevRules[prevRules.length - 1]
+        if (lastRule.max_cost === null || lastRule.max_cost === undefined || lastRule.max_cost === '') {
+          setError('Cannot add a rule after an open-ended rule (with no upper limit). Uncheck No Upper Limit on the last rule first.')
+          return prevRules
+        }
+        nextMin = Number(lastRule.max_cost) || 0
       }
-      nextMin = Number(lastRule.max_cost) || 0
-    }
-    setRules([...rules, { min_cost: nextMin, max_cost: nextMin + 10, markup_percent: 50, active: true }])
+      return [
+        ...prevRules,
+        { min_cost: nextMin, max_cost: nextMin + 10, markup_percent: 50, active: true },
+      ]
+    })
   }
 
   const handleUpdateRule = (index, field, value) => {
     setError('')
     setSuccess('')
-    const updated = [...rules]
-    if (field === 'max_cost' && (value === '' || value === null)) {
-      updated[index].max_cost = null
-    } else if (field === 'isOpenEnded') {
-      updated[index].max_cost = value ? null : (Number(updated[index].min_cost) || 0) + 10
-    } else {
-      updated[index][field] = value === '' ? '' : Number(value)
-    }
-    setRules(updated)
+    setRules((prevRules) => {
+      return prevRules.map((rule, idx) => {
+        if (idx !== index) return rule
+        const updatedRule = { ...rule }
+        if (field === 'max_cost' && (value === '' || value === null)) {
+          updatedRule.max_cost = null
+        } else if (field === 'isOpenEnded') {
+          updatedRule.max_cost = value ? null : (Number(rule.min_cost) || 0) + 10
+        } else {
+          updatedRule[field] = value === '' ? '' : Number(value)
+        }
+        return updatedRule
+      })
+    })
   }
 
   const handleDeleteRule = (index) => {
     setError('')
     setSuccess('')
-    setRules(rules.filter((_, i) => i !== index))
+    setRules((prevRules) => prevRules.filter((_, i) => i !== index))
   }
 
   const handleMoveRule = (index, direction) => {
     setError('')
     setSuccess('')
-    const target = index + direction
-    if (target < 0 || target >= rules.length) return
-    const updated = [...rules]
-    const temp = updated[index]
-    updated[index] = updated[target]
-    updated[target] = temp
-    setRules(updated)
+    setRules((prevRules) => {
+      const target = index + direction
+      if (target < 0 || target >= prevRules.length) return prevRules
+      const next = [...prevRules]
+      const temp = next[index]
+      next[index] = next[target]
+      next[target] = temp
+      return next
+    })
   }
 
-  // ── Category Rule Handlers ────────────────────────────────────────────────
+  // ── Category Rule Handlers (Immutable) ────────────────────────────────────
   const handleAddCatRule = () => {
     setCatError('')
     setCatSuccess('')
@@ -199,7 +230,7 @@ export default function StorePriceRuleSettings({
       priority: nextPriority,
       active: true,
     }
-    setCatRules([...catRules, newRule])
+    setCatRules((prev) => [...prev, newRule])
     setNewCatName('')
     setNewCatMarkup('')
   }
@@ -207,37 +238,40 @@ export default function StorePriceRuleSettings({
   const handleUpdateCatRule = (index, field, value) => {
     setCatError('')
     setCatSuccess('')
-    const updated = [...catRules]
-    if (field === 'markup_percent') {
-      updated[index].markup_percent = value === '' ? '' : Number(value)
-    } else if (field === 'active') {
-      updated[index].active = Boolean(value)
-    } else if (field === 'category') {
-      updated[index].category = value
-    }
-    setCatRules(updated)
+    setCatRules((prev) => {
+      return prev.map((rule, idx) => {
+        if (idx !== index) return rule
+        const updated = { ...rule }
+        if (field === 'markup_percent') {
+          updated.markup_percent = value === '' ? '' : Number(value)
+        } else if (field === 'active') {
+          updated.active = Boolean(value)
+        } else if (field === 'category') {
+          updated.category = value
+        }
+        return updated
+      })
+    })
   }
 
   const handleDeleteCatRule = (index) => {
     setCatError('')
     setCatSuccess('')
-    setCatRules(catRules.filter((_, i) => i !== index))
+    setCatRules((prev) => prev.filter((_, i) => i !== index))
   }
 
   const handleMoveCatRule = (index, direction) => {
     setCatError('')
     setCatSuccess('')
-    const target = index + direction
-    if (target < 0 || target >= catRules.length) return
-    const updated = [...catRules]
-    const temp = updated[index]
-    updated[index] = updated[target]
-    updated[target] = temp
-    // Re-index priorities to 1, 2, 3...
-    updated.forEach((r, i) => {
-      r.priority = i + 1
+    setCatRules((prev) => {
+      const target = index + direction
+      if (target < 0 || target >= prev.length) return prev
+      const next = [...prev]
+      const temp = next[index]
+      next[index] = next[target]
+      next[target] = temp
+      return next.map((r, i) => ({ ...r, priority: i + 1 }))
     })
-    setCatRules(updated)
   }
 
   const handleSaveCategoryRules = async () => {

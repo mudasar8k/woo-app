@@ -1,6 +1,7 @@
 'use client'
 
 import { useState, useEffect } from 'react'
+import VariationPriceOverrideModal from '@/app/components/VariationPriceOverrideModal'
 import { useRouter } from 'next/navigation'
 import { formatMoney, toNumber, round2 } from '@/app/lib/pricing'
 

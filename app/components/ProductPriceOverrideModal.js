@@ -1,6 +1,7 @@
 'use client'
 
 import { useState, useEffect } from 'react'
+import VariationPriceOverrideModal from '@/app/components/VariationPriceOverrideModal'
 import { formatMoney, toNumber, round2 } from '@/app/lib/pricing'
 
 export default function ProductPriceOverrideModal({
@@ -485,6 +486,20 @@ export default function ProductPriceOverrideModal({
           </div>
         </div>
       </div>
+
+      {/* ── Variation-Level Override Modal ───────────────────────────────── */}
+      {showVariationModal && (
+        <VariationPriceOverrideModal
+          isOpen={showVariationModal}
+          onClose={() => setShowVariationModal(false)}
+          storeId={storeId}
+          productId={product.id}
+          product={product}
+          onSaved={() => {
+            if (onSaved) onSaved()
+          }}
+        />
+      )}
 
       {/* ── Save / Reset Confirmation Modal ────────────────────────────────── */}
       {showConfirm && (

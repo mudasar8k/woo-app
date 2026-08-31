@@ -279,7 +279,7 @@ export default async function ProductsPage({ params, searchParams }) {
         storePricingContext={storePricingContext}
         rangeRules={rangeRules}
         categoryRules={categoryRules}
-        products={productsResult.rows}
+        products={enrichedProducts}
         status={status}
         currentPage={page}
         totalPages={totalPages}

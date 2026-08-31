@@ -2,14 +2,16 @@
  * Centralized Store Pricing Engine
  *
  * Supports:
- * 1. Product fixed selling-price override
- * 2. Product custom markup % override
- * 3. Store Category pricing rules (with priority ordering)
- * 4. Store price-range rules (deterministic boundaries: min < cost <= max, with 0 <= cost <= max for 0-min)
- * 5. Store fallback markup % (for price range gaps)
- * 6. Store legacy markup % override (e.g. Store 4 +177%)
- * 7. Super-admin global default markup %
- * 8. Fallback to cost (sell = cost)
+ * 1. Variation fixed selling-price override (Highest Priority)
+ * 2. Variation custom markup % override
+ * 3. Product fixed selling-price override
+ * 4. Product custom markup % override
+ * 5. Store Category pricing rules (with priority ordering)
+ * 6. Store price-range rules (deterministic boundaries: min < cost <= max, with 0 <= cost <= max for 0-min)
+ * 7. Store fallback markup % (for price range gaps)
+ * 8. Store legacy markup % override (e.g. Store 4 +177%)
+ * 9. Super-admin global default markup %
+ * 10. Fallback to cost (sell = cost)
  */
 
 function toNumber(value) {
@@ -195,17 +197,19 @@ function matchCategoryPricingRule(productCategories, categoryRules) {
 }
 
 /**
- * Pure Centralized Pricing Resolver with Category-Based Rules.
+ * Pure Centralized Pricing Resolver with Variation, Product, and Category-Based Rules.
  *
  * Priority Hierarchy:
- * 1. Product fixed selling-price override
- * 2. Product custom markup % override
- * 3. Store Category pricing rules (with priority ordering)
- * 4. Store price-range rules (when pricing_mode === 'range_rules')
- * 5. Store fallback markup % (when pricing_mode === 'range_rules' and cost falls in a gap)
- * 6. Store legacy markup % override (stores.price_rule_percent)
- * 7. Super-admin default markup % (app_settings.default_price_rule_percent)
- * 8. Cost price fallback (sell = cost)
+ * 1. Variation Fixed selling-price override (variation_fixed)
+ * 2. Variation Custom markup % override (variation_custom_markup)
+ * 3. Product Fixed selling-price override (product_fixed)
+ * 4. Product Custom markup % override (product_custom_markup)
+ * 5. Store Category pricing rules (category_rule)
+ * 6. Store Price-range rules (range_rule)
+ * 7. Store Fallback markup % (store_fallback_markup)
+ * 8. Store Legacy markup % override (store_legacy_override)
+ * 9. Super-admin Default markup % (super_admin_default)
+ * 10. Cost Price fallback (cost_price)
  */
 function resolveItemPrice(
   rawCost,
@@ -213,7 +217,8 @@ function resolveItemPrice(
   rangeRules = [],
   productOverride = null,
   productCategories = null,
-  categoryRules = []
+  categoryRules = [],
+  variationOverride = null
 ) {
   const cost = toNumber(rawCost)
   if (cost === null) {
@@ -228,7 +233,39 @@ function resolveItemPrice(
     }
   }
 
-  // ── Priority 1: Product Fixed Selling Price ─────────────────────────────
+  // ── Priority 1: Variation Fixed Selling Price ───────────────────────────
+  if (variationOverride && variationOverride.override_type === 'fixed_price') {
+    const fixedPrice = toNumber(variationOverride.fixed_price)
+    if (fixedPrice !== null && fixedPrice >= 0) {
+      return {
+        sellingPrice: round2(fixedPrice),
+        source: 'variation_fixed',
+        appliedMarkup: null,
+        matchedRuleId: null,
+        matchedCategoryRuleId: null,
+        matchedCategory: null,
+        cost,
+      }
+    }
+  }
+
+  // ── Priority 2: Variation Custom Markup % ───────────────────────────────
+  if (variationOverride && variationOverride.override_type === 'custom_markup') {
+    const customMarkup = toNumber(variationOverride.custom_markup_percent)
+    if (customMarkup !== null && customMarkup >= 0) {
+      return {
+        sellingPrice: round2(cost * (1 + customMarkup / 100)),
+        source: 'variation_custom_markup',
+        appliedMarkup: customMarkup,
+        matchedRuleId: null,
+        matchedCategoryRuleId: null,
+        matchedCategory: null,
+        cost,
+      }
+    }
+  }
+
+  // ── Priority 3: Product Fixed Selling Price ─────────────────────────────
   if (productOverride && productOverride.override_type === 'fixed_price') {
     const fixedPrice = toNumber(productOverride.fixed_price)
     if (fixedPrice !== null && fixedPrice >= 0) {
@@ -244,7 +281,7 @@ function resolveItemPrice(
     }
   }
 
-  // ── Priority 2: Product Custom Markup % ─────────────────────────────────
+  // ── Priority 4: Product Custom Markup % ─────────────────────────────────
   if (productOverride && productOverride.override_type === 'custom_markup') {
     const customMarkup = toNumber(productOverride.custom_markup_percent)
     if (customMarkup !== null && customMarkup >= 0) {
@@ -260,7 +297,7 @@ function resolveItemPrice(
     }
   }
 
-  // ── Priority 3: Store Category Pricing Rules ────────────────────────────
+  // ── Priority 5: Store Category Pricing Rules ────────────────────────────
   const matchedCatRule = matchCategoryPricingRule(productCategories, categoryRules)
   if (matchedCatRule) {
     const catMarkup = toNumber(matchedCatRule.markup_percent)
@@ -277,7 +314,7 @@ function resolveItemPrice(
     }
   }
 
-  // ── Priority 4: Store Price Ranges (when pricing_mode === 'range_rules') ─
+  // ── Priority 6: Store Price Ranges (when pricing_mode === 'range_rules') ─
   const pricingMode = storeContext.pricing_mode || 'legacy_markup'
 
   if (pricingMode === 'range_rules' && Array.isArray(rangeRules) && rangeRules.length > 0) {
@@ -310,7 +347,7 @@ function resolveItemPrice(
     }
   }
 
-  // ── Priority 5: Store Fallback Markup % (for gaps) ──────────────────────
+  // ── Priority 7: Store Fallback Markup % (for gaps) ──────────────────────
   if (pricingMode === 'range_rules') {
     const fallback = toNumber(storeContext.fallback_markup_percent)
     if (fallback !== null && fallback >= 0) {
@@ -326,7 +363,7 @@ function resolveItemPrice(
     }
   }
 
-  // ── Priority 6: Store Legacy Markup Override ────────────────────────────
+  // ── Priority 8: Store Legacy Markup Override ────────────────────────────
   const storeOverride = toNumber(storeContext.price_rule_percent)
   if (storeOverride !== null) {
     return {
@@ -340,7 +377,7 @@ function resolveItemPrice(
     }
   }
 
-  // ── Priority 7: Super-Admin Global Default ──────────────────────────────
+  // ── Priority 9: Super-Admin Global Default ──────────────────────────────
   const defaultPercent = toNumber(storeContext.default_price_rule_percent ?? storeContext.defaultPercent)
   if (defaultPercent !== null) {
     return {
@@ -354,7 +391,7 @@ function resolveItemPrice(
     }
   }
 
-  // ── Priority 8: Cost Price Fallback ─────────────────────────────────────
+  // ── Priority 10: Cost Price Fallback ────────────────────────────────────
   return {
     sellingPrice: round2(cost),
     source: 'cost_price',
@@ -387,7 +424,8 @@ function resolveStorePrice(
   productOverride = null,
   rangeRules = [],
   productCategories = null,
-  categoryRules = []
+  categoryRules = [],
+  variationOverride = null
 ) {
   const cost = resolveCostPrice(row)
   if (cost === null) return null
@@ -406,7 +444,8 @@ function resolveStorePrice(
     rangeRules,
     productOverride,
     productCategories || row?.categories,
-    categoryRules
+    categoryRules,
+    variationOverride
   )
   return result.sellingPrice
 }
@@ -544,6 +583,110 @@ async function loadProductStoreOverrides(db, storeId, productIds) {
   return map
 }
 
+/**
+ * Batch-loads variation store pricing overrides for an array of variation IDs in a single query.
+ *
+ * @param {object} db - Database client/pool
+ * @param {number} storeId - Store ID
+ * @param {Array<number>} variationIds - Array of variation IDs
+ * @returns {Promise<Map<number, object>>} Map of variationId => override object
+ */
+async function loadVariationStoreOverrides(db, storeId, variationIds) {
+  const map = new Map()
+  if (!Array.isArray(variationIds) || variationIds.length === 0) {
+    return map
+  }
+
+  try {
+    const res = await db.query(
+      'SELECT variation_id, product_id, override_type, custom_markup_percent, fixed_price, updated_at FROM variation_store_pricing WHERE store_id = $1 AND variation_id = ANY($2::int[])',
+      [storeId, variationIds]
+    )
+    for (const row of res.rows) {
+      map.set(row.variation_id, {
+        variation_id: row.variation_id,
+        product_id: row.product_id,
+        override_type: row.override_type,
+        custom_markup_percent: row.custom_markup_percent !== null ? Number(row.custom_markup_percent) : null,
+        fixed_price: row.fixed_price !== null ? Number(row.fixed_price) : null,
+        updated_at: row.updated_at,
+      })
+    }
+  } catch {
+    // Table may not exist or query failed, return empty map
+  }
+
+  return map
+}
+
+/**
+ * Loads all variation store pricing overrides for a single product.
+ *
+ * @param {object} db - Database client/pool
+ * @param {number} storeId - Store ID
+ * @param {number} productId - Product ID
+ * @returns {Promise<Map<number, object>>} Map of variationId => override object
+ */
+async function loadProductVariationStoreOverrides(db, storeId, productId) {
+  const map = new Map()
+  if (!productId || !storeId) return map
+
+  try {
+    const res = await db.query(
+      'SELECT variation_id, product_id, override_type, custom_markup_percent, fixed_price, updated_at FROM variation_store_pricing WHERE store_id = $1 AND product_id = $2',
+      [storeId, productId]
+    )
+    for (const row of res.rows) {
+      map.set(row.variation_id, {
+        variation_id: row.variation_id,
+        product_id: row.product_id,
+        override_type: row.override_type,
+        custom_markup_percent: row.custom_markup_percent !== null ? Number(row.custom_markup_percent) : null,
+        fixed_price: row.fixed_price !== null ? Number(row.fixed_price) : null,
+        updated_at: row.updated_at,
+      })
+    }
+  } catch {
+    // Return empty map on error
+  }
+
+  return map
+}
+
+/**
+ * Batch-loads counts of variation overrides per product for a store (used for table badge rendering).
+ *
+ * @param {object} db - Database client/pool
+ * @param {number} storeId - Store ID
+ * @param {Array<number>} productIds - Array of product IDs
+ * @returns {Promise<Map<number, number>>} Map of productId => override count
+ */
+async function loadVariationOverridesCountMap(db, storeId, productIds) {
+  const map = new Map()
+  if (!Array.isArray(productIds) || productIds.length === 0) {
+    return map
+  }
+
+  try {
+    const res = await db.query(
+      `SELECT product_id, COUNT(*)::int as count
+       FROM variation_store_pricing
+       WHERE store_id = $1
+         AND product_id = ANY($2::int[])
+         AND override_type IN ('custom_markup', 'fixed_price')
+       GROUP BY product_id`,
+      [storeId, productIds]
+    )
+    for (const row of res.rows) {
+      map.set(row.product_id, row.count)
+    }
+  } catch {
+    // Return empty map on error
+  }
+
+  return map
+}
+
 module.exports = {
   round2,
   toNumber,
@@ -559,4 +702,7 @@ module.exports = {
   resolveItemPrice,
   loadStorePricingEngine,
   loadProductStoreOverrides,
+  loadVariationStoreOverrides,
+  loadProductVariationStoreOverrides,
+  loadVariationOverridesCountMap,
 }

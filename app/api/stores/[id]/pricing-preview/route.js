@@ -13,6 +13,8 @@ import {
   resolveItemPrice,
   loadStorePricingEngine,
   loadProductStoreOverrides,
+  loadVariationStoreOverrides,
+  loadProductVariationStoreOverrides,
   toNumber,
   round2,
 } from '../../../../lib/pricing'
@@ -125,9 +127,10 @@ export async function POST(request, { params }) {
       const productIds = prodsRes.rows.map((p) => p.id)
       let variationsByProduct = new Map()
       let overridesMap = new Map()
+      let varOverridesMap = new Map()
 
       if (productIds.length > 0) {
-        // Parallel batch fetch: variations + product pricing overrides (Zero N+1 queries)
+        // Parallel batch fetch: variations + product pricing overrides + variation pricing overrides (Zero N+1 queries)
         const [varsRes, loadedOverrides] = await Promise.all([
           db.query(
             `SELECT id, product_id, sku, price, regular_price, size, color
@@ -138,6 +141,9 @@ export async function POST(request, { params }) {
           ),
           loadProductStoreOverrides(db, storeId, productIds),
         ])
+
+        const variationIds = varsRes.rows.map((v) => v.id)
+        varOverridesMap = await loadVariationStoreOverrides(db, storeId, variationIds)
 
         for (const v of varsRes.rows) {
           if (!variationsByProduct.has(v.product_id)) {
@@ -162,13 +168,16 @@ export async function POST(request, { params }) {
           const cost = resolveCostPrice(repVar)
           if (cost === null || cost <= 0) continue
 
+          const varOverride = varOverridesMap.get(repVar.id) || null
+
           const currentRes = resolveItemPrice(
             cost,
             storeContext,
             savedRangeRules,
             override,
             prod.categories,
-            savedCategoryRules
+            savedCategoryRules,
+            varOverride
           )
 
           const proposedRes = resolveItemPrice(
@@ -177,7 +186,8 @@ export async function POST(request, { params }) {
             proposedRangeRules,
             override,
             prod.categories,
-            proposedCategoryRules
+            proposedCategoryRules,
+            varOverride
           )
 
           const currentPrice = currentRes.sellingPrice
@@ -286,7 +296,10 @@ export async function POST(request, { params }) {
     }
 
     const product = prodRes.rows[0]
-    const overridesMap = await loadProductStoreOverrides(db, storeId, [productId])
+    const [overridesMap, varOverridesMap] = await Promise.all([
+      loadProductStoreOverrides(db, storeId, [productId]),
+      loadProductVariationStoreOverrides(db, storeId, productId),
+    ])
     const productOverride = overridesMap.get(productId) || null
 
     const parentCost = resolveCostPrice(product)
@@ -309,13 +322,15 @@ export async function POST(request, { params }) {
 
     const variationsPreview = varRes.rows.map((v) => {
       const varCost = resolveCostPrice(v)
+      const varOverride = varOverridesMap.get(v.id) || null
       const varCalc = resolveItemPrice(
         varCost,
         storeContext,
         savedRangeRules,
         productOverride,
         product.categories,
-        savedCategoryRules
+        savedCategoryRules,
+        varOverride
       )
       return {
         id: v.id,
@@ -328,6 +343,11 @@ export async function POST(request, { params }) {
         applied_markup: varCalc.appliedMarkup,
         matched_rule_id: varCalc.matchedRuleId,
         matched_category: varCalc.matchedCategory || null,
+        override: varOverride || {
+          override_type: 'product_rules',
+          custom_markup_percent: null,
+          fixed_price: null,
+        },
       }
     })
 

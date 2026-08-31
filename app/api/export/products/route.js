@@ -43,7 +43,7 @@ function serializeVariation(row, storeContext, rangeRules, productOverride, prod
   }
 }
 
-function serializeProduct(row, variations, storeContext, rangeRules, productOverride, categoryRules) {
+function serializeProduct(row, variations, storeContext, rangeRules, productOverride, categoryRules, varOverridesMap = null) {
   const cost = resolveCostPrice(row)
   const calc = resolveItemPrice(cost, storeContext, rangeRules, productOverride, row.categories, categoryRules)
   const sell = calc.sellingPrice

@@ -440,7 +440,7 @@ export default function RalawiseSyncButton({
   const result = job?.result
   const showProgress = status !== 'idle'
 
-  const canStop = (isRunning(status) || loading) && !actionBusy
+  const canStop = isRunning(status) && !actionBusy
   const canResume = status === 'paused' && !actionBusy && !loading
 
   return (

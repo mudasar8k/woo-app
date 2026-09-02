@@ -269,14 +269,21 @@ async function getSyncJob(db, jobId) {
 
 async function getActiveSyncJobForStore(db, storeId) {
   await ensureJobsTable(db)
+  // Fetch the single most-recent job for this store, then decide whether it is
+  // "active". We must NOT look past a terminal job to find older stale rows —
+  // that would cause a crashed job from a previous session to be rediscovered
+  // and re-run automatically after a later sync has already completed.
   const result = await db.query(
     `SELECT * FROM ralawise_sync_jobs
-     WHERE store_id = $1 AND status NOT IN ('completed', 'failed')
+     WHERE store_id = $1
      ORDER BY id DESC
      LIMIT 1`,
     [storeId]
   )
-  return result.rows[0] || null
+  const row = result.rows[0]
+  if (!row) return null
+  if (row.status === JOB_STATUS.COMPLETED || row.status === JOB_STATUS.FAILED) return null
+  return row
 }
 
 async function saveJobPayloads(db, jobId, { parentRows, variationRows, rawParentText, rawVarText }) {

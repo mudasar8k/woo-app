@@ -6,6 +6,7 @@ import {
   verifyAdminStoreAccess,
 } from '../../../../lib/role-guards'
 import { prepareRalawiseSync } from '../../../../lib/ralawise-batch-importer'
+import { getActiveSyncJobForStore, serializeJob } from '../../../../lib/ralawise-sync-jobs'
 
 export const maxDuration = 60
 export const runtime = 'nodejs'
@@ -56,6 +57,19 @@ export async function POST(request) {
     )
     if (vendorCheck.rows.length === 0) {
       return NextResponse.json({ error: 'Vendor not found or inactive' }, { status: 404 })
+    }
+
+    // Guard against concurrent syncs. If a non-terminal job already exists as the
+    // most-recent job for this store, return it instead of creating a duplicate.
+    const existingJob = await getActiveSyncJobForStore(db, storeId)
+    if (existingJob) {
+      return NextResponse.json(
+        {
+          error: 'A sync is already in progress. Stop or wait for it to finish before starting a new one.',
+          job: serializeJob(existingJob),
+        },
+        { status: 409 }
+      )
     }
 
     const result = await prepareRalawiseSync({

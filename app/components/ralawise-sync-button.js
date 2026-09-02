@@ -296,38 +296,32 @@ export default function RalawiseSyncButton({
     }
 
     if (savedJobId) {
+      // This tab was orchestrating a specific job — reconnect to it.
       fetch(`/api/ralawise/sync/${savedJobId}/status`)
         .then((r) => safeFetchJson(r))
         .then((data) => {
           if (data && data.ok && data.status !== 'completed' && data.status !== 'failed') {
             applyJob(data)
             if (isRunning(data.status)) {
+              // Same job, same tab — safe to auto-resume orchestration.
               runBatchLoop(data.jobId, data.phase || 'parents')
             }
           } else {
-            // If stored job finished or invalid, check server for active job
+            // Stored job is terminal or unreachable — clear stale storage and
+            // show idle UI. Do NOT fall through to server discovery: that could
+            // find an older stale job and restart it unintentionally.
             try {
               sessionStorage.removeItem(STORAGE_KEY(storeId))
             } catch {}
-            fetch(`/api/ralawise/sync?store_id=${storeId}`)
-              .then((r) => safeFetchJson(r))
-              .then((res) => {
-                if (res?.ok && res?.job) {
-                  applyJob(res.job)
-                  try {
-                    sessionStorage.setItem(STORAGE_KEY(storeId), JSON.stringify({ jobId: res.job.jobId }))
-                  } catch {}
-                  if (isRunning(res.job.status)) {
-                    runBatchLoop(res.job.jobId, res.job.phase || 'parents')
-                  }
-                }
-              })
-              .catch(() => {})
           }
         })
         .catch(() => {})
     } else {
-      // No saved session, query server for any active/paused job
+      // No session storage — query server to display any active/paused job.
+      // Do NOT auto-call runBatchLoop here: without session-storage confirmation
+      // that this tab was already orchestrating the job, starting the batch loop
+      // could re-run a stale crashed job from a prior session.
+      // The user must explicitly click Resume to restart orchestration.
       fetch(`/api/ralawise/sync?store_id=${storeId}`)
         .then((r) => safeFetchJson(r))
         .then((res) => {
@@ -336,9 +330,6 @@ export default function RalawiseSyncButton({
             try {
               sessionStorage.setItem(STORAGE_KEY(storeId), JSON.stringify({ jobId: res.job.jobId }))
             } catch {}
-            if (isRunning(res.job.status)) {
-              runBatchLoop(res.job.jobId, res.job.phase || 'parents')
-            }
           }
         })
         .catch(() => {})

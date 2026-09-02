@@ -304,44 +304,101 @@ ${sku5},${sku5}_GRN_M,Green,Green,M,9.00,8.50,8.00`
     const bugFixCheck = isRunningTest('importing_variations') && !false // actionBusy=false
     assert(bugFixCheck, 'discovered running job with loading=false -> Stop still visible (bug fix)')
 
-    // 15. Server-Side Discovery: no new job created on refresh (DB level)
-    console.log('\n--- Test 15: Refresh Does Not Create New Job ---')
-    // getActiveSyncJobForStore is a SELECT-only; it never inserts. Confirm by checking it
-    // returns null for a store with no active jobs (all test fixtures cleaned above).
-    const noNewJob = await getActiveSyncJobForStore(db, storeId)
-    // After cleanup, mockLegacyJob was marked failed -> excluded. jobId completed -> excluded.
-    assert(noNewJob === null || (noNewJob.id !== jobId && noNewJob.id !== mockLegacyJob.id),
-      'getActiveSyncJobForStore (refresh discovery) does not create a new job')
-
-    // 16. sessionStorage missing -> server discovery -> Stop visible (logic layer)
-    console.log('\n--- Test 16: sessionStorage Missing -> Discovery -> Stop Logic ---')
-    // Create a fresh running job to simulate what discovery would find
-    const discoveryJob = await createSyncJob(db, { storeId, vendorId, userId })
-    await updateSyncJob(db, discoveryJob.id, {
+    // 15. getActiveSyncJobForStore — stale job invisible after newer terminal job
+    console.log('\n--- Test 15: Stale Job Not Returned After Newer Completed Job ---')
+    // Simulate: staleJob (importing_variations) then completedJob (completed).
+    // getActiveSyncJobForStore must return null because the LATEST job is completed.
+    const staleJob = await createSyncJob(db, { storeId, vendorId, userId })
+    await updateSyncJob(db, staleJob.id, {
       status: JOB_STATUS.IMPORTING_VARIATIONS,
       step: 'importing_variations',
       phase: 'variations',
-      variation_total: 100120,
-      variation_processed: 81800,
-      variation_cursor: 81800,
+      variation_total: 99729,
+      variation_processed: 34800,
+      variation_cursor: 34800,
     })
-    const discoveredRow = await getActiveSyncJobForStore(db, storeId)
-    assert(discoveredRow !== null, 'Discovery finds running job when sessionStorage is missing')
-    assert(discoveredRow.status === JOB_STATUS.IMPORTING_VARIATIONS, 'Discovered job status is importing_variations')
-    const discoveredSerialized = serializeJob(discoveredRow)
-    assert(isRunningTest(discoveredSerialized.status), 'Serialized discovered job isRunning() = true')
-    assert(canStopTest(discoveredSerialized.status, false), 'sessionStorage missing -> discovery -> canStop = true -> Stop visible')
-    assert(discoveredSerialized.variationCursor === 81800, 'Discovered job preserves variationCursor')
+    const laterJob = await createSyncJob(db, { storeId, vendorId, userId })
+    await updateSyncJob(db, laterJob.id, {
+      status: JOB_STATUS.COMPLETED,
+      step: JOB_STATUS.COMPLETED,
+      phase: 'completed',
+      completed_at: new Date(),
+    })
+    const discoveryAfterComplete = await getActiveSyncJobForStore(db, storeId)
+    assert(discoveryAfterComplete === null,
+      'getActiveSyncJobForStore returns null when latest job is completed (stale importing job invisible)')
 
-    // 17. No active job -> discovery returns null -> no automatic sync created
-    console.log('\n--- Test 17: No Active Job -> No Automatic Sync Created ---')
-    await updateSyncJob(db, discoveryJob.id, { status: JOB_STATUS.COMPLETED })
-    const afterComplete = await getActiveSyncJobForStore(db, storeId)
-    assert(afterComplete === null || afterComplete.id !== discoveryJob.id,
-      'Completed job excluded from discovery -> no job = no auto-sync trigger at DB level')
+    // 16. getActiveSyncJobForStore returns active job when no terminal job follows it
+    console.log('\n--- Test 16: Discovery Returns Running Job When No Terminal Follows ---')
+    // Remove the later completed job — now stale job is latest
+    await db.query(`DELETE FROM ralawise_sync_jobs WHERE id = $1`, [laterJob.id])
+    const discoveryStaleOnly = await getActiveSyncJobForStore(db, storeId)
+    assert(discoveryStaleOnly !== null && discoveryStaleOnly.id === staleJob.id,
+      'getActiveSyncJobForStore returns non-terminal job when it is the most recent')
+    assert(discoveryStaleOnly.status === JOB_STATUS.IMPORTING_VARIATIONS,
+      'Discovered job has correct status')
 
-    await db.query(`DELETE FROM ralawise_sync_jobs WHERE id = $1`, [discoveryJob.id])
-    console.log('Cleaned up discovery test fixture.')
+    // Restore: mark stale job as failed so later tests start clean
+    await updateSyncJob(db, staleJob.id, { status: JOB_STATUS.FAILED })
+
+    // 17. Completed job excluded from discovery
+    console.log('\n--- Test 17: Completed Job Excluded From Discovery ---')
+    const checkCompleted = await createSyncJob(db, { storeId, vendorId, userId })
+    await updateSyncJob(db, checkCompleted.id, { status: JOB_STATUS.COMPLETED, completed_at: new Date() })
+    const notFound = await getActiveSyncJobForStore(db, storeId)
+    assert(notFound === null, 'Completed job excluded from getActiveSyncJobForStore')
+
+    // Failed job excluded
+    await updateSyncJob(db, checkCompleted.id, { status: JOB_STATUS.FAILED })
+    const notFoundFailed = await getActiveSyncJobForStore(db, storeId)
+    assert(notFoundFailed === null, 'Failed job excluded from getActiveSyncJobForStore')
+
+    await db.query(`DELETE FROM ralawise_sync_jobs WHERE id IN ($1, $2)`, [staleJob.id, checkCompleted.id])
+
+    // 18. Stop-Button / UI State Logic Tests
+    console.log('\n--- Test 18: Stop-Button Rendering Logic (canStop / canResume) ---')
+
+    assert(canStopTest('importing_variations', false), 'importing_variations -> Stop visible')
+    assert(canStopTest('importing_products',   false), 'importing_products   -> Stop visible')
+    assert(canStopTest('queued',               false), 'queued               -> Stop visible')
+    assert(canStopTest('connecting',           false), 'connecting           -> Stop visible')
+    assert(canStopTest('downloading',          false), 'downloading          -> Stop visible')
+    assert(canStopTest('delta',                false), 'delta                -> Stop visible')
+    assert(canStopTest('finalize',             false), 'finalize             -> Stop visible')
+    assert(!canStopTest('importing_variations', true), 'importing_variations + actionBusy -> Stop hidden')
+    assert( canResumeTest('paused', false, false),     'paused -> Resume visible')
+    assert(!canStopTest('paused', false),              'paused -> Stop hidden')
+    assert(!canStopTest('completed', false),           'completed -> Stop hidden')
+    assert(!canResumeTest('completed', false, false),  'completed -> Resume hidden')
+    assert(!canStopTest('failed', false),              'failed -> Stop hidden')
+    assert(!canStopTest('idle', false),                'idle -> Stop hidden')
+    // Bug-fix check: discovered running job with loading=false must still show Stop
+    assert(isRunningTest('importing_variations') && !false,
+      'discovered running job with loading=false -> Stop still visible (bug fix)')
+
+    // 19. completed job -> refresh -> NO POST and idle UI (logic layer)
+    console.log('\n--- Test 19: Completed Job -> Refresh -> No Auto-Restart ---')
+    // Create a completed job and verify discovery returns null (no runBatchLoop would be called)
+    const completedFixture = await createSyncJob(db, { storeId, vendorId, userId })
+    await updateSyncJob(db, completedFixture.id, { status: JOB_STATUS.COMPLETED, completed_at: new Date() })
+    const completedDiscovery = await getActiveSyncJobForStore(db, storeId)
+    assert(completedDiscovery === null, 'completed job + refresh -> discovery returns null -> no POST triggered')
+
+    // 20. double-prepare guard (server side 409)
+    console.log('\n--- Test 20: Double-Prepare Guard (Concurrent Job Protection) ---')
+    const guardJob = await createSyncJob(db, { storeId, vendorId, userId })
+    await updateSyncJob(db, guardJob.id, {
+      status: JOB_STATUS.IMPORTING_VARIATIONS,
+      phase: 'variations',
+    })
+    const guardCheck = await getActiveSyncJobForStore(db, storeId)
+    assert(guardCheck !== null && guardCheck.id === guardJob.id,
+      'Running job found by getActiveSyncJobForStore (would trigger 409 in prepare route)')
+    assert(guardCheck.status === JOB_STATUS.IMPORTING_VARIATIONS,
+      'Running job has correct status for 409 guard')
+
+    await db.query(`DELETE FROM ralawise_sync_jobs WHERE id IN ($1, $2)`, [completedFixture.id, guardJob.id])
+    console.log('Cleaned up Test 18-20 fixtures.')
 
   } catch (err) {
     console.error('Test error:', err)

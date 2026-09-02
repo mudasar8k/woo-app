@@ -146,6 +146,12 @@ async function ensureJobsTable(db) {
     ALTER TABLE ralawise_sync_jobs ALTER COLUMN initiated_by DROP NOT NULL
   `).catch(() => {})
   await db.query(`
+    ALTER TABLE product_variations ALTER COLUMN csv_upload_id DROP NOT NULL
+  `).catch(() => {})
+  await db.query(`
+    ALTER TABLE products ALTER COLUMN csv_upload_id DROP NOT NULL
+  `).catch(() => {})
+  await db.query(`
     ALTER TABLE ralawise_sync_jobs
     DROP CONSTRAINT IF EXISTS ralawise_sync_jobs_status_check
   `)
@@ -314,32 +320,28 @@ async function getParentBatchSlice(db, jobId, start, limit) {
   await ensureJobsTable(db)
   const end = Math.max(0, start + limit - 1)
   const result = await db.query(
-    `SELECT jsonb_path_query_array(parent_rows, ('$[' || $2::text || ' to ' || $3::text || ']')::jsonpath) as slice,
-            jsonb_array_length(parent_rows) as total
+    `SELECT jsonb_path_query_array(parent_rows, ('$[' || $2::text || ' to ' || $3::text || ']')::jsonpath) as slice
      FROM ralawise_sync_job_payloads WHERE job_id = $1`,
     [jobId, start, end]
   )
   if (result.rows.length === 0) return null
   const slice = result.rows[0].slice
-  const total = result.rows[0].total || 0
   const rows = Array.isArray(slice) ? slice : (typeof slice === 'string' ? JSON.parse(slice) : [])
-  return { rows, total }
+  return { rows }
 }
 
 async function getVariationBatchSlice(db, jobId, start, limit) {
   await ensureJobsTable(db)
   const end = Math.max(0, start + limit - 1)
   const result = await db.query(
-    `SELECT jsonb_path_query_array(variation_rows, ('$[' || $2::text || ' to ' || $3::text || ']')::jsonpath) as slice,
-            jsonb_array_length(variation_rows) as total
+    `SELECT jsonb_path_query_array(variation_rows, ('$[' || $2::text || ' to ' || $3::text || ']')::jsonpath) as slice
      FROM ralawise_sync_job_payloads WHERE job_id = $1`,
     [jobId, start, end]
   )
   if (result.rows.length === 0) return null
   const slice = result.rows[0].slice
-  const total = result.rows[0].total || 0
   const rows = Array.isArray(slice) ? slice : (typeof slice === 'string' ? JSON.parse(slice) : [])
-  return { rows, total }
+  return { rows }
 }
 
 async function cleanupJobPayloads(db, jobId) {

@@ -32,7 +32,7 @@ const {
 } = require('./ralawise-sync-jobs')
 
 const DEFAULT_PARENT_BATCH_SIZE = 50
-const DEFAULT_VARIATION_BATCH_SIZE = 150
+const DEFAULT_VARIATION_BATCH_SIZE = 25
 
 /**
  * Phase 1: Prepare
@@ -232,7 +232,7 @@ async function processParentBatch({ jobId, db, batchSize = DEFAULT_PARENT_BATCH_
   if (!payloadSlice) throw new Error(`Job ${jobId} payloads not found`)
 
   const batchRows = payloadSlice.rows || []
-  const total = Number(payloadSlice.total) || Number(job.parent_total) || 0
+  const total = Number(job.parent_total) || 0
 
   if (start >= total || total === 0 || batchRows.length === 0) {
     const nextPhase = (Number(job.variation_total) || 0) > 0 ? 'variations' : 'finalize'
@@ -321,15 +321,35 @@ async function processVariationBatch({ jobId, db, batchSize = DEFAULT_VARIATION_
     return { paused: true, job: serializeJob(job) }
   }
 
-  const effectiveBatchSize = Math.max(1, Math.min(Number(batchSize) || DEFAULT_VARIATION_BATCH_SIZE, 300))
+  const effectiveBatchSize = Math.max(1, Math.min(Number(batchSize) || DEFAULT_VARIATION_BATCH_SIZE, 100))
   const start = Number(job.variation_cursor) || 0
+  const total = Number(job.variation_total) || 0
+
+  if (start >= total || total === 0) {
+    const updated = await updateSyncJob(db, jobId, {
+      phase: 'finalize',
+      step: JOB_STATUS.FINALIZE,
+      status: JOB_STATUS.FINALIZE,
+      message: 'Finalizing sync...',
+    })
+    if (job.csv_upload_var_id) {
+      await finalizeCsvUpload(db, job.csv_upload_var_id, Number(job.variation_processed) || total, [])
+    }
+    return {
+      ok: true,
+      phase: 'finalize',
+      variationProcessed: Number(job.variation_processed) || total,
+      variationTotal: total,
+      hasMore: false,
+      job: serializeJob(updated),
+    }
+  }
+
   const payloadSlice = await getVariationBatchSlice(db, jobId, start, effectiveBatchSize)
   if (!payloadSlice) throw new Error(`Job ${jobId} payloads not found`)
 
   const batchRows = payloadSlice.rows || []
-  const total = Number(payloadSlice.total) || Number(job.variation_total) || 0
-
-  if (start >= total || total === 0 || batchRows.length === 0) {
+  if (batchRows.length === 0) {
     const updated = await updateSyncJob(db, jobId, {
       phase: 'finalize',
       step: JOB_STATUS.FINALIZE,
@@ -530,7 +550,9 @@ async function resumeRalawiseSync({ jobId, db, files = null }) {
     variation_cursor: varCursor,
     variation_processed: varProcessed,
     variation_total: varTotal,
-    message: `Resuming at ${parentProcessed} / ${parentTotal}...`,
+    message: phase === 'variations'
+      ? `Resuming variations at ${varProcessed} / ${varTotal}...`
+      : `Resuming at ${parentProcessed} / ${parentTotal}...`,
     error_message: null,
   })
 

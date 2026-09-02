@@ -7,7 +7,7 @@ import { Check, Circle, Loader2, Pause, Play, RefreshCw, X } from 'lucide-react'
 const STORAGE_KEY = (storeId) => `ralawise-sync-job:${storeId}`
 
 const PARENT_BATCH_SIZE = 50
-const VARIATION_BATCH_SIZE = 150
+const VARIATION_BATCH_SIZE = 25
 
 const STEPS = [
   { key: 'connecting', label: 'Connecting to Ralawise' },
@@ -162,7 +162,7 @@ export default function RalawiseSyncButton({
         currentPhase = data.phase
       }
 
-      // 2. Process Variation Batches (150 items/batch for serverless safety)
+      // 2. Process Variation Batches (25 items/batch for serverless safety)
       while (currentPhase === 'variations') {
         if (abortRef.current) break
 

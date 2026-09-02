@@ -191,10 +191,45 @@ export default function RalawiseSyncButton({
       fetch(`/api/ralawise/sync/${savedJobId}/status`)
         .then((r) => r.json())
         .then((data) => {
-          if (data && !data.error) {
+          if (data && !data.error && data.status !== 'completed' && data.status !== 'failed') {
             applyJob(data)
             if (isRunning(data.status)) {
               runBatchLoop(data.jobId, data.phase || 'parents')
+            }
+          } else {
+            // If stored job finished or invalid, check server for active job
+            try {
+              sessionStorage.removeItem(STORAGE_KEY(storeId))
+            } catch {}
+            fetch(`/api/ralawise/sync?store_id=${storeId}`)
+              .then((r) => r.json())
+              .then((res) => {
+                if (res?.job) {
+                  applyJob(res.job)
+                  try {
+                    sessionStorage.setItem(STORAGE_KEY(storeId), JSON.stringify({ jobId: res.job.jobId }))
+                  } catch {}
+                  if (isRunning(res.job.status)) {
+                    runBatchLoop(res.job.jobId, res.job.phase || 'parents')
+                  }
+                }
+              })
+              .catch(() => {})
+          }
+        })
+        .catch(() => {})
+    } else {
+      // No saved session, query server for any active/paused job
+      fetch(`/api/ralawise/sync?store_id=${storeId}`)
+        .then((r) => r.json())
+        .then((res) => {
+          if (res?.job) {
+            applyJob(res.job)
+            try {
+              sessionStorage.setItem(STORAGE_KEY(storeId), JSON.stringify({ jobId: res.job.jobId }))
+            } catch {}
+            if (isRunning(res.job.status)) {
+              runBatchLoop(res.job.jobId, res.job.phase || 'parents')
             }
           }
         })
@@ -387,12 +422,13 @@ export default function RalawiseSyncButton({
               const isVarStep = step.key === 'importing_variations'
               const isImportStep = isProductStep || isVarStep
 
-              const stepProcessed = isProductStep
-                ? (job.parentProcessed || 0)
-                : (isVarStep ? (job.variationProcessed || 0) : job.current)
-              const stepTotal = isProductStep
-                ? (job.parentTotal || 0)
-                : (isVarStep ? (job.variationTotal || 0) : job.total)
+              const parentTotal = (job.parentTotal > 0 ? job.parentTotal : (job.step === 'importing_products' ? (job.total || 0) : 0))
+              const parentProcessed = (job.parentTotal > 0 ? (job.parentProcessed || 0) : (job.step === 'importing_products' ? (job.current || 0) : 0))
+              const varTotal = (job.variationTotal > 0 ? job.variationTotal : (job.step === 'importing_variations' ? (job.total || 0) : 0))
+              const varProcessed = (job.variationTotal > 0 ? (job.variationProcessed || 0) : (job.step === 'importing_variations' ? (job.current || 0) : 0))
+
+              const stepProcessed = isProductStep ? parentProcessed : (isVarStep ? varProcessed : job.current)
+              const stepTotal = isProductStep ? parentTotal : (isVarStep ? varTotal : job.total)
 
               const showCounts =
                 (state === 'active' || state === 'paused') &&

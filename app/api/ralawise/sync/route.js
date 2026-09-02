@@ -5,10 +5,50 @@ import {
   requireAdminOrSuperAdminApi,
   verifyAdminStoreAccess,
 } from '../../../lib/role-guards'
+import {
+  getActiveSyncJobForStore,
+  serializeJob,
+} from '../../../lib/ralawise-sync-jobs'
 import { prepareRalawiseSync } from '../../../lib/ralawise-batch-importer'
 
 export const maxDuration = 60
 export const runtime = 'nodejs'
+
+export async function GET(request) {
+  try {
+    const session = await auth()
+    const roleCheck = requireAdminOrSuperAdminApi(session)
+    if (!roleCheck.ok) {
+      return NextResponse.json({ error: roleCheck.error }, { status: roleCheck.status })
+    }
+
+    const { searchParams } = new URL(request.url)
+    const storeId = parseInt(searchParams.get('store_id'), 10)
+
+    if (!storeId || Number.isNaN(storeId)) {
+      return NextResponse.json({ error: 'store_id is required' }, { status: 400 })
+    }
+
+    if (session.user.role === 'admin') {
+      const hasAccess = await verifyAdminStoreAccess(db, session.user.id, storeId)
+      if (!hasAccess) {
+        return NextResponse.json(
+          { error: 'Unauthorized access to this store' },
+          { status: 403 }
+        )
+      }
+    }
+
+    const job = await getActiveSyncJobForStore(db, storeId)
+    return NextResponse.json({ job: serializeJob(job) })
+  } catch (error) {
+    console.error('Failed to get active Ralawise sync job:', error)
+    return NextResponse.json(
+      { error: error.message || 'Failed to get active Ralawise sync job' },
+      { status: 500 }
+    )
+  }
+}
 
 export async function POST(request) {
   try {

@@ -11,6 +11,7 @@ const {
   getSyncJob,
   updateSyncJob,
   createSyncJob,
+  getActiveSyncJobForStore,
   serializeJob,
   JOB_STATUS,
 } = require('../app/lib/ralawise-sync-jobs')
@@ -230,6 +231,24 @@ ${sku5},${sku5}_GRN_M,Green,Green,M,9.00,8.50,8.00`
       },
     })
     assert(doubleResume.parentCursor === 3550, 'Double resume preserves existing cursor at 3550')
+
+    // 13. Server-Side Active Job Discovery Tests
+    console.log('\n--- Test 13: Server-Side Active Job Discovery ---')
+    const activeDiscovered = await getActiveSyncJobForStore(db, storeId)
+    assert(activeDiscovered !== null, 'getActiveSyncJobForStore discovers active/paused job')
+    assert(activeDiscovered.id === mockLegacyJob.id, `Discovers latest non-terminal job (id=${mockLegacyJob.id})`)
+    assert(activeDiscovered.status === JOB_STATUS.IMPORTING_PRODUCTS, 'Discovered job has active status')
+
+    // Mark completed and verify exclusion
+    await updateSyncJob(db, mockLegacyJob.id, { status: JOB_STATUS.COMPLETED })
+    const excludedCompleted = await getActiveSyncJobForStore(db, storeId)
+    // Should be null or another earlier job if exists
+    assert(excludedCompleted?.id !== mockLegacyJob.id, 'Completed job is excluded from active discovery')
+
+    // Mark failed and verify exclusion
+    await updateSyncJob(db, mockLegacyJob.id, { status: JOB_STATUS.FAILED })
+    const excludedFailed = await getActiveSyncJobForStore(db, storeId)
+    assert(excludedFailed?.id !== mockLegacyJob.id, 'Failed job is excluded from active discovery')
 
     // Cleanup test fixtures
     await db.query(`DELETE FROM product_variations WHERE sku LIKE 'TBAT_${runId}_%'`)

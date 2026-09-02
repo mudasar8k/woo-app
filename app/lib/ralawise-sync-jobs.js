@@ -261,6 +261,18 @@ async function getSyncJob(db, jobId) {
   return result.rows[0] || null
 }
 
+async function getActiveSyncJobForStore(db, storeId) {
+  await ensureJobsTable(db)
+  const result = await db.query(
+    `SELECT * FROM ralawise_sync_jobs
+     WHERE store_id = $1 AND status NOT IN ('completed', 'failed')
+     ORDER BY id DESC
+     LIMIT 1`,
+    [storeId]
+  )
+  return result.rows[0] || null
+}
+
 async function saveJobPayloads(db, jobId, { parentRows, variationRows, rawParentText, rawVarText }) {
   await ensureJobsTable(db)
   await db.query(
@@ -361,7 +373,7 @@ async function assertJobNotPaused(db, jobId) {
   const job = await getSyncJob(db, jobId)
   if (job?.status === JOB_STATUS.PAUSED || job?.cancel_requested) {
     throw new SyncPausedError(
-      job.message || 'Sync paused � click Resume to continue'
+      job.message || 'Sync paused - click Resume to continue'
     )
   }
   return job
@@ -376,6 +388,7 @@ module.exports = {
   createSyncJob,
   updateSyncJob,
   getSyncJob,
+  getActiveSyncJobForStore,
   saveJobPayloads,
   getJobPayloads,
   cleanupJobPayloads,

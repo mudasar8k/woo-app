@@ -9,6 +9,7 @@ const JOB_STATUS = {
   DELTA: 'delta',
   IMPORTING_PRODUCTS: 'importing_products',
   IMPORTING_VARIATIONS: 'importing_variations',
+  FINALIZE: 'finalize',
   PAUSED: 'paused',
   COMPLETED: 'completed',
   FAILED: 'failed',
@@ -21,6 +22,7 @@ const ALLOWED_STATUSES = [
   'delta',
   'importing_products',
   'importing_variations',
+  'finalize',
   'paused',
   'completed',
   'failed',
@@ -50,9 +52,16 @@ const CREATE_TABLE_SQL = `
     initiated_by INTEGER REFERENCES users(id),
     status VARCHAR(40) NOT NULL DEFAULT 'queued',
     step VARCHAR(80),
+    phase VARCHAR(40) DEFAULT 'prepare',
     message TEXT,
     current_count INTEGER DEFAULT 0,
     total_count INTEGER DEFAULT 0,
+    parent_total INTEGER DEFAULT 0,
+    parent_processed INTEGER DEFAULT 0,
+    parent_cursor INTEGER DEFAULT 0,
+    variation_total INTEGER DEFAULT 0,
+    variation_processed INTEGER DEFAULT 0,
+    variation_cursor INTEGER DEFAULT 0,
     products_new INTEGER DEFAULT 0,
     products_updated INTEGER DEFAULT 0,
     products_skipped INTEGER DEFAULT 0,
@@ -61,12 +70,26 @@ const CREATE_TABLE_SQL = `
     variations_updated INTEGER DEFAULT 0,
     variations_skipped INTEGER DEFAULT 0,
     variations_errors INTEGER DEFAULT 0,
+    cancel_requested BOOLEAN DEFAULT FALSE,
+    csv_upload_parent_id INTEGER,
+    csv_upload_var_id INTEGER,
     result_json JSONB,
     error_message TEXT,
     started_at TIMESTAMP,
     completed_at TIMESTAMP,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  )
+`
+
+const CREATE_PAYLOADS_TABLE_SQL = `
+  CREATE TABLE IF NOT EXISTS ralawise_sync_job_payloads (
+    job_id INTEGER PRIMARY KEY REFERENCES ralawise_sync_jobs(id) ON DELETE CASCADE,
+    parent_rows JSONB,
+    variation_rows JSONB,
+    raw_parent_text TEXT,
+    raw_var_text TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   )
 `
 
@@ -79,9 +102,16 @@ const ALTER_COLUMNS = [
   ['initiated_by', 'INTEGER'],
   ['status', "VARCHAR(40) DEFAULT 'queued'"],
   ['step', 'VARCHAR(80)'],
+  ['phase', "VARCHAR(40) DEFAULT 'prepare'"],
   ['message', 'TEXT'],
   ['current_count', 'INTEGER DEFAULT 0'],
   ['total_count', 'INTEGER DEFAULT 0'],
+  ['parent_total', 'INTEGER DEFAULT 0'],
+  ['parent_processed', 'INTEGER DEFAULT 0'],
+  ['parent_cursor', 'INTEGER DEFAULT 0'],
+  ['variation_total', 'INTEGER DEFAULT 0'],
+  ['variation_processed', 'INTEGER DEFAULT 0'],
+  ['variation_cursor', 'INTEGER DEFAULT 0'],
   ['products_new', 'INTEGER DEFAULT 0'],
   ['products_updated', 'INTEGER DEFAULT 0'],
   ['products_skipped', 'INTEGER DEFAULT 0'],
@@ -90,6 +120,9 @@ const ALTER_COLUMNS = [
   ['variations_updated', 'INTEGER DEFAULT 0'],
   ['variations_skipped', 'INTEGER DEFAULT 0'],
   ['variations_errors', 'INTEGER DEFAULT 0'],
+  ['cancel_requested', 'BOOLEAN DEFAULT FALSE'],
+  ['csv_upload_parent_id', 'INTEGER'],
+  ['csv_upload_var_id', 'INTEGER'],
   ['result_json', 'JSONB'],
   ['error_message', 'TEXT'],
   ['started_at', 'TIMESTAMP'],
@@ -103,11 +136,15 @@ let tableReady = false
 async function ensureJobsTable(db) {
   if (tableReady) return
   await db.query(CREATE_TABLE_SQL)
+  await db.query(CREATE_PAYLOADS_TABLE_SQL)
   for (const [name, definition] of ALTER_COLUMNS) {
     await db.query(
       `ALTER TABLE ralawise_sync_jobs ADD COLUMN IF NOT EXISTS ${name} ${definition}`
     )
   }
+  await db.query(`
+    ALTER TABLE ralawise_sync_jobs ALTER COLUMN initiated_by DROP NOT NULL
+  `).catch(() => {})
   await db.query(`
     ALTER TABLE ralawise_sync_jobs
     DROP CONSTRAINT IF EXISTS ralawise_sync_jobs_status_check
@@ -122,6 +159,7 @@ async function ensureJobsTable(db) {
       'delta',
       'importing_products',
       'importing_variations',
+      'finalize',
       'paused',
       'completed',
       'failed'
@@ -135,8 +173,8 @@ async function createSyncJob(db, { storeId, vendorId, userId }) {
   await ensureJobsTable(db)
   const result = await db.query(
     `INSERT INTO ralawise_sync_jobs
-       (store_id, vendor_id, initiated_by, status, step, message)
-     VALUES ($1, $2, $3, $4, $5, $6)
+       (store_id, vendor_id, initiated_by, status, step, phase, message, started_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP)
      RETURNING *`,
     [
       storeId,
@@ -144,6 +182,7 @@ async function createSyncJob(db, { storeId, vendorId, userId }) {
       userId || null,
       JOB_STATUS.QUEUED,
       JOB_STATUS.QUEUED,
+      'prepare',
       'Queued',
     ]
   )
@@ -160,9 +199,16 @@ async function updateSyncJob(db, jobId, fields = {}) {
   const allowed = [
     'status',
     'step',
+    'phase',
     'message',
     'current_count',
     'total_count',
+    'parent_total',
+    'parent_processed',
+    'parent_cursor',
+    'variation_total',
+    'variation_processed',
+    'variation_cursor',
     'products_new',
     'products_updated',
     'products_skipped',
@@ -171,6 +217,9 @@ async function updateSyncJob(db, jobId, fields = {}) {
     'variations_updated',
     'variations_skipped',
     'variations_errors',
+    'cancel_requested',
+    'csv_upload_parent_id',
+    'csv_upload_var_id',
     'result_json',
     'error_message',
     'started_at',
@@ -212,13 +261,59 @@ async function getSyncJob(db, jobId) {
   return result.rows[0] || null
 }
 
+async function saveJobPayloads(db, jobId, { parentRows, variationRows, rawParentText, rawVarText }) {
+  await ensureJobsTable(db)
+  await db.query(
+    `INSERT INTO ralawise_sync_job_payloads (job_id, parent_rows, variation_rows, raw_parent_text, raw_var_text)
+     VALUES ($1, $2, $3, $4, $5)
+     ON CONFLICT (job_id) DO UPDATE SET
+       parent_rows = EXCLUDED.parent_rows,
+       variation_rows = EXCLUDED.variation_rows,
+       raw_parent_text = EXCLUDED.raw_parent_text,
+       raw_var_text = EXCLUDED.raw_var_text`,
+    [
+      jobId,
+      JSON.stringify(parentRows || []),
+      JSON.stringify(variationRows || []),
+      rawParentText || null,
+      rawVarText || null,
+    ]
+  )
+}
+
+async function getJobPayloads(db, jobId) {
+  await ensureJobsTable(db)
+  const result = await db.query(
+    `SELECT * FROM ralawise_sync_job_payloads WHERE job_id = $1`,
+    [jobId]
+  )
+  if (result.rows.length === 0) return null
+  const row = result.rows[0]
+  return {
+    parentRows: typeof row.parent_rows === 'string' ? JSON.parse(row.parent_rows) : (row.parent_rows || []),
+    variationRows: typeof row.variation_rows === 'string' ? JSON.parse(row.variation_rows) : (row.variation_rows || []),
+    rawParentText: row.raw_parent_text,
+    rawVarText: row.raw_var_text,
+  }
+}
+
+async function cleanupJobPayloads(db, jobId) {
+  await ensureJobsTable(db)
+  await db.query(`DELETE FROM ralawise_sync_job_payloads WHERE job_id = $1`, [jobId])
+}
+
 function serializeJob(row) {
   if (!row) return null
 
-  const current = row.current_count || 0
-  const total = row.total_count || 0
+  const parentTotal = row.parent_total || 0
+  const parentProcessed = row.parent_processed || 0
+  const varTotal = row.variation_total || 0
+  const varProcessed = row.variation_processed || 0
+
+  const grandTotal = parentTotal + varTotal || row.total_count || 0
+  const grandProcessed = parentProcessed + varProcessed || row.current_count || 0
   const progressPercent =
-    total > 0 ? Math.min(100, Math.round((current / total) * 100)) : 0
+    grandTotal > 0 ? Math.min(100, Math.round((grandProcessed / grandTotal) * 100)) : 0
 
   return {
     jobId: row.id,
@@ -226,9 +321,17 @@ function serializeJob(row) {
     vendorId: row.vendor_id,
     status: row.status,
     step: row.step,
+    phase: row.phase || 'prepare',
     message: row.message,
-    current: current,
-    total: total,
+    current: grandProcessed,
+    total: grandTotal,
+    parentTotal,
+    parentProcessed,
+    parentCursor: row.parent_cursor || 0,
+    variationTotal: varTotal,
+    variationProcessed: varProcessed,
+    variationCursor: row.variation_cursor || 0,
+    cancelRequested: Boolean(row.cancel_requested),
     progressPercent,
     products: {
       new: row.products_new || 0,
@@ -256,84 +359,12 @@ function serializeJob(row) {
  */
 async function assertJobNotPaused(db, jobId) {
   const job = await getSyncJob(db, jobId)
-  if (job?.status === JOB_STATUS.PAUSED) {
+  if (job?.status === JOB_STATUS.PAUSED || job?.cancel_requested) {
     throw new SyncPausedError(
-      job.message || 'Sync paused — click Resume to continue'
+      job.message || 'Sync paused � click Resume to continue'
     )
   }
   return job
-}
-
-/**
- * Build an onProgress callback that writes job progress to the DB.
- * Throws SyncPausedError if the job was stopped.
- */
-function makeJobProgressUpdater(db, jobId) {
-  return async function onProgress(progress = {}) {
-    await assertJobNotPaused(db, jobId)
-
-    const fields = {}
-
-    if (progress.step != null) {
-      fields.status = progress.step
-      fields.step = progress.step
-    }
-    if (progress.status != null) {
-      fields.status = progress.status
-    }
-    if (progress.message != null) fields.message = progress.message
-    if (progress.current != null) fields.current_count = progress.current
-    if (progress.total != null) fields.total_count = progress.total
-
-    if (progress.products_new != null) fields.products_new = progress.products_new
-    if (progress.products_updated != null) {
-      fields.products_updated = progress.products_updated
-    }
-    if (progress.products_skipped != null) {
-      fields.products_skipped = progress.products_skipped
-    }
-    if (progress.products_errors != null) {
-      fields.products_errors = progress.products_errors
-    }
-    if (progress.variations_new != null) {
-      fields.variations_new = progress.variations_new
-    }
-    if (progress.variations_updated != null) {
-      fields.variations_updated = progress.variations_updated
-    }
-    if (progress.variations_skipped != null) {
-      fields.variations_skipped = progress.variations_skipped
-    }
-    if (progress.variations_errors != null) {
-      fields.variations_errors = progress.variations_errors
-    }
-
-    if (progress.newCount != null && progress.step === JOB_STATUS.IMPORTING_PRODUCTS) {
-      fields.products_new = progress.newCount
-    }
-    if (
-      progress.updatedCount != null &&
-      progress.step === JOB_STATUS.IMPORTING_PRODUCTS
-    ) {
-      fields.products_updated = progress.updatedCount
-    }
-    if (
-      progress.newCount != null &&
-      progress.step === JOB_STATUS.IMPORTING_VARIATIONS
-    ) {
-      fields.variations_new = progress.newCount
-    }
-    if (
-      progress.updatedCount != null &&
-      progress.step === JOB_STATUS.IMPORTING_VARIATIONS
-    ) {
-      fields.variations_updated = progress.updatedCount
-    }
-
-    if (Object.keys(fields).length === 0) return
-    await updateSyncJob(db, jobId, fields)
-    await assertJobNotPaused(db, jobId)
-  }
 }
 
 module.exports = {
@@ -345,7 +376,9 @@ module.exports = {
   createSyncJob,
   updateSyncJob,
   getSyncJob,
+  saveJobPayloads,
+  getJobPayloads,
+  cleanupJobPayloads,
   serializeJob,
   assertJobNotPaused,
-  makeJobProgressUpdater,
 }

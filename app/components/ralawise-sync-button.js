@@ -4,7 +4,6 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Button } from '@/app/components/ui/button'
 import { Check, Circle, Loader2, Pause, Play, RefreshCw, X } from 'lucide-react'
 
-const POLL_MS = 1500
 const STORAGE_KEY = (storeId) => `ralawise-sync-job:${storeId}`
 
 const STEPS = [
@@ -22,6 +21,7 @@ const STEP_ORDER = [
   'delta',
   'importing_products',
   'importing_variations',
+  'finalize',
   'completed',
   'failed',
 ]
@@ -33,6 +33,7 @@ const ACTIVE_STATUSES = new Set([
   'delta',
   'importing_products',
   'importing_variations',
+  'finalize',
 ])
 
 function stepIndex(status) {
@@ -80,20 +81,13 @@ export default function RalawiseSyncButton({
   const [actionBusy, setActionBusy] = useState(false)
   const [error, setError] = useState('')
   const [job, setJob] = useState(null)
-  const pollRef = useRef(null)
-
-  const stopPolling = useCallback(() => {
-    if (pollRef.current) {
-      clearInterval(pollRef.current)
-      pollRef.current = null
-    }
-  }, [])
+  const abortRef = useRef(false)
 
   const applyJob = useCallback(
     (data) => {
+      if (!data) return
       setJob(data)
       if (isTerminal(data.status)) {
-        stopPolling()
         setLoading(false)
         try {
           sessionStorage.removeItem(STORAGE_KEY(storeId))
@@ -104,194 +98,194 @@ export default function RalawiseSyncButton({
           setError(data.error || data.message || 'Ralawise sync failed')
         }
       } else if (data.status === 'paused') {
-        stopPolling()
         setLoading(false)
       } else if (isRunning(data.status)) {
         setLoading(true)
       }
     },
-    [stopPolling, storeId]
+    [storeId]
   )
 
-  const pollStatus = useCallback(
-    async (jobId) => {
-      try {
-        const response = await fetch(`/api/ralawise/sync/${jobId}/status`)
-        const data = await response.json().catch(() => ({}))
-        if (!response.ok) {
-          throw new Error(data.error || 'Failed to load sync status')
-        }
-        applyJob(data)
-        return data
-      } catch (err) {
-        setError(err.message || 'Failed to load sync status')
-        stopPolling()
-        setLoading(false)
-        return null
-      }
-    },
-    [applyJob, stopPolling]
-  )
+  const runBatchLoop = useCallback(async (jobId, startingPhase = 'parents') => {
+    setLoading(true)
+    abortRef.current = false
+    let currentPhase = startingPhase
 
-  const startPolling = useCallback(
-    (jobId) => {
-      stopPolling()
-      setLoading(true)
-      pollStatus(jobId)
-      pollRef.current = setInterval(() => {
-        pollStatus(jobId)
-      }, POLL_MS)
-    },
-    [pollStatus, stopPolling]
-  )
-
-  useEffect(() => {
-    let cancelled = false
     try {
-      const saved = sessionStorage.getItem(STORAGE_KEY(storeId))
-      if (!saved) return
-      const jobId = parseInt(saved, 10)
-      if (!jobId || Number.isNaN(jobId)) return
+      // 1. Process Parent Batches
+      while (currentPhase === 'parents') {
+        if (abortRef.current) break
 
-      ;(async () => {
-        const data = await pollStatus(jobId)
-        if (cancelled || !data) return
-        if (isRunning(data.status)) {
-          startPolling(jobId)
+        const res = await fetch(`/api/ralawise/sync/${jobId}/batch-parents`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ batchSize: 250 }),
+        })
+        const data = await res.json()
+        if (!res.ok) throw new Error(data.error || 'Parent batch failed')
+
+        if (data.paused || data.job?.status === 'paused') {
+          applyJob(data.job)
+          return
         }
-      })()
+
+        applyJob(data.job)
+        currentPhase = data.phase
+      }
+
+      // 2. Process Variation Batches
+      while (currentPhase === 'variations') {
+        if (abortRef.current) break
+
+        const res = await fetch(`/api/ralawise/sync/${jobId}/batch-variations`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ batchSize: 500 }),
+        })
+        const data = await res.json()
+        if (!res.ok) throw new Error(data.error || 'Variation batch failed')
+
+        if (data.paused || data.job?.status === 'paused') {
+          applyJob(data.job)
+          return
+        }
+
+        applyJob(data.job)
+        currentPhase = data.phase
+      }
+
+      // 3. Finalize
+      if (currentPhase === 'finalize') {
+        if (abortRef.current) return
+
+        const res = await fetch(`/api/ralawise/sync/${jobId}/finalize`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+        })
+        const data = await res.json()
+        if (!res.ok) throw new Error(data.error || 'Finalize failed')
+
+        applyJob(data.job)
+      }
+    } catch (err) {
+      console.error('Batched sync error:', err)
+      setError(err.message || 'Sync failed')
+      setLoading(false)
+    }
+  }, [applyJob])
+
+  // Restore active or paused job from session/server on mount
+  useEffect(() => {
+    let savedJobId = null
+    try {
+      const raw = sessionStorage.getItem(STORAGE_KEY(storeId))
+      if (raw) {
+        const parsed = JSON.parse(raw)
+        savedJobId = parsed?.jobId
+      }
     } catch {
       // ignore
     }
-    return () => {
-      cancelled = true
-      stopPolling()
-    }
-  }, [storeId]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  useEffect(() => () => stopPolling(), [stopPolling])
+    if (savedJobId) {
+      fetch(`/api/ralawise/sync/${savedJobId}/status`)
+        .then((r) => r.json())
+        .then((data) => {
+          if (data && !data.error) {
+            applyJob(data)
+            if (isRunning(data.status)) {
+              runBatchLoop(data.jobId, data.phase || 'parents')
+            }
+          }
+        })
+        .catch(() => {})
+    }
+  }, [storeId, applyJob, runBatchLoop])
 
   const handleSync = async () => {
-    if (!vendorId) {
-      setError('Select a vendor first')
-      return
-    }
-
-    if (
-      !confirm(
-        'Download the latest Ralawise catalog and import new + updated products/variations into WooApp? Progress will show below; you can Stop and Resume anytime.'
-      )
-    ) {
-      return
-    }
-
-    setLoading(true)
     setError('')
-    setJob(null)
+    setLoading(true)
+    setActionBusy(true)
+    abortRef.current = false
 
     try {
-      const response = await fetch('/api/ralawise/sync', {
+      const res = await fetch('/api/ralawise/sync/prepare', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          store_id: storeId,
-          vendor_id: parseInt(vendorId, 10),
-        }),
+        body: JSON.stringify({ store_id: storeId, vendor_id: vendorId }),
       })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || 'Prepare failed')
 
-      const data = await response.json().catch(() => ({}))
-      if (!response.ok) {
-        throw new Error(data.error || 'Ralawise sync failed')
-      }
-
-      const jobId = data.jobId
+      applyJob(data.job)
       try {
-        sessionStorage.setItem(STORAGE_KEY(storeId), String(jobId))
+        sessionStorage.setItem(
+          STORAGE_KEY(storeId),
+          JSON.stringify({ jobId: data.jobId })
+        )
       } catch {
         // ignore
       }
 
-      setJob({
-        jobId,
-        status: data.status || 'queued',
-        step: 'queued',
-        message: 'Queued',
-        current: 0,
-        total: 0,
-        progressPercent: 0,
-        products: { new: 0, updated: 0, skipped: 0, errors: 0 },
-        variations: { new: 0, updated: 0, skipped: 0, errors: 0 },
-      })
-      startPolling(jobId)
+      if (data.phase === 'completed' || data.no_changes) {
+        setLoading(false)
+        setActionBusy(false)
+        return
+      }
+
+      await runBatchLoop(data.jobId, data.phase || 'parents')
     } catch (err) {
-      setError(err.message || 'Ralawise sync failed')
+      setError(err.message || 'Failed to start sync')
       setLoading(false)
+    } finally {
+      setActionBusy(false)
     }
   }
 
   const handleStop = async () => {
     if (!job?.jobId) return
+    abortRef.current = true
     setActionBusy(true)
-    setError('')
     try {
-      const response = await fetch(`/api/ralawise/sync/${job.jobId}/stop`, {
+      const res = await fetch(`/api/ralawise/sync/${job.jobId}/stop`, {
         method: 'POST',
       })
-      const data = await response.json().catch(() => ({}))
-      if (!response.ok) {
-        throw new Error(data.error || 'Failed to stop sync')
-      }
+      const data = await res.json()
       applyJob(data)
     } catch (err) {
-      setError(err.message || 'Failed to stop sync')
+      console.error('Stop error:', err)
     } finally {
       setActionBusy(false)
+      setLoading(false)
     }
   }
 
   const handleResume = async () => {
     if (!job?.jobId) return
-    setActionBusy(true)
     setError('')
+    setActionBusy(true)
+    abortRef.current = false
     try {
-      const response = await fetch(`/api/ralawise/sync/${job.jobId}/resume`, {
-        method: 'POST',
-      })
-      const data = await response.json().catch(() => ({}))
-      if (!response.ok) {
-        throw new Error(data.error || 'Failed to resume sync')
-      }
-      try {
-        sessionStorage.setItem(STORAGE_KEY(storeId), String(job.jobId))
-      } catch {
-        // ignore
-      }
-      applyJob({ ...job, ...data, status: data.status || job.step || 'connecting' })
-      startPolling(job.jobId)
+      const res = await fetch(`/api/ralawise/sync/${job.jobId}/status`)
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || 'Failed to get job status')
+
+      applyJob(data)
+      await runBatchLoop(job.jobId, data.phase || 'parents')
     } catch (err) {
       setError(err.message || 'Failed to resume sync')
-      setLoading(false)
     } finally {
       setActionBusy(false)
     }
   }
 
-  const status = job?.status || null
-  const activeKey =
-    status === 'failed' || status === 'paused'
-      ? job?.step || 'connecting'
-      : status
-  const currentStepIdx = activeKey ? stepIndex(activeKey) : -1
-  const showProgress =
-    Boolean(job) &&
-    (loading ||
-      status === 'completed' ||
-      status === 'failed' ||
-      status === 'paused' ||
-      isRunning(status))
-  const result = status === 'completed' ? job?.result || job : null
-  const canStop = isRunning(status) && !actionBusy
-  const canResume = status === 'paused' && !actionBusy
+  const status = job?.status || 'idle'
+  const currentStepIdx = stepIndex(status)
+  const result = job?.result
+  const showProgress = status !== 'idle'
+
+  const canStop = (isRunning(status) || loading) && !actionBusy
+  const canResume = status === 'paused' && !actionBusy && !loading
 
   return (
     <div className={compact ? 'space-y-2' : 'space-y-3'}>
@@ -323,7 +317,7 @@ export default function RalawiseSyncButton({
           onClick={handleSync}
         >
           <RefreshCw className={`h-4 w-4 mr-2 ${loading ? 'animate-spin' : ''}`} />
-          {loading ? 'Syncing from Ralawise…' : 'Sync from Ralawise'}
+          {loading ? 'Syncing from Ralawise�' : 'Sync from Ralawise'}
         </Button>
 
         {canStop && (
@@ -378,12 +372,23 @@ export default function RalawiseSyncButton({
                 state = status === 'failed' ? 'failed' : 'active'
               }
 
-              const isImportStep =
-                step.key === 'importing_products' || step.key === 'importing_variations'
+              const isProductStep = step.key === 'importing_products'
+              const isVarStep = step.key === 'importing_variations'
+              const isImportStep = isProductStep || isVarStep
+
+              const stepProcessed = isProductStep
+                ? (job.parentProcessed || 0)
+                : (isVarStep ? (job.variationProcessed || 0) : job.current)
+              const stepTotal = isProductStep
+                ? (job.parentTotal || 0)
+                : (isVarStep ? (job.variationTotal || 0) : job.total)
+
               const showCounts =
                 (state === 'active' || state === 'paused') &&
                 isImportStep &&
-                job.total > 0
+                stepTotal > 0
+
+              const stepPercent = stepTotal > 0 ? Math.min(100, Math.round((stepProcessed / stepTotal) * 100)) : 0
 
               return (
                 <li key={step.key} className="flex items-start gap-2 text-sm">
@@ -405,11 +410,11 @@ export default function RalawiseSyncButton({
                       }
                     >
                       {step.label}
-                      {state === 'active' ? '…' : ''}
+                      {state === 'active' ? '�' : ''}
                       {state === 'paused' ? ' (paused)' : ''}
                       {showCounts ? (
                         <span className="ml-1 font-normal text-gray-600">
-                          {job.current.toLocaleString()} / {job.total.toLocaleString()}
+                          {stepProcessed.toLocaleString()} / {stepTotal.toLocaleString()}
                         </span>
                       ) : null}
                     </p>
@@ -432,7 +437,7 @@ export default function RalawiseSyncButton({
                               state === 'paused' ? 'bg-amber-500' : 'bg-green-600'
                             }`}
                             style={{
-                              width: `${job.progressPercent || 0}%`,
+                              width: `${stepPercent}%`,
                             }}
                           />
                         </div>

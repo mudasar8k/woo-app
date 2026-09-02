@@ -1,11 +1,11 @@
-import { NextResponse } from 'next/server'
-import db from '../../../lib/db'
-import { auth } from '../../auth/[...nextauth]/route'
+﻿import { NextResponse } from 'next/server'
+import db from '../../../../lib/db'
+import { auth } from '../../../auth/[...nextauth]/route'
 import {
   requireAdminOrSuperAdminApi,
   verifyAdminStoreAccess,
-} from '../../../lib/role-guards'
-import { prepareRalawiseSync } from '../../../lib/ralawise-batch-importer'
+} from '../../../../lib/role-guards'
+import { prepareRalawiseSync } from '../../../../lib/ralawise-batch-importer'
 
 export const maxDuration = 60
 export const runtime = 'nodejs'
@@ -67,9 +67,9 @@ export async function POST(request) {
 
     return NextResponse.json(result)
   } catch (error) {
-    console.error('Ralawise sync failed to start:', error)
+    console.error('Ralawise sync prepare error:', error)
     return NextResponse.json(
-      { error: error.message || 'Ralawise sync failed' },
+      { error: error.message || 'Failed to prepare Ralawise sync' },
       { status: 500 }
     )
   }

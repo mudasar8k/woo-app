@@ -5,16 +5,13 @@ import {
   requireAdminOrSuperAdminApi,
   verifyAdminStoreAccess,
 } from '../../../../../lib/role-guards'
-import {
-  JOB_STATUS,
-  getSyncJob,
-  updateSyncJob,
-  serializeJob,
-} from '../../../../../lib/ralawise-sync-jobs'
+import { getSyncJob } from '../../../../../lib/ralawise-sync-jobs'
+import { finalizeRalawiseSync } from '../../../../../lib/ralawise-batch-importer'
 
+export const maxDuration = 60
 export const runtime = 'nodejs'
 
-export async function POST(_request, { params }) {
+export async function POST(request, { params }) {
   try {
     const session = await auth()
     const roleCheck = requireAdminOrSuperAdminApi(session)
@@ -25,7 +22,7 @@ export async function POST(_request, { params }) {
     const { id } = await params
     const jobId = parseInt(id, 10)
     if (!jobId || Number.isNaN(jobId)) {
-      return NextResponse.json({ error: 'Invalid job id' }, { status: 400 })
+      return NextResponse.json({ error: 'Invalid job ID' }, { status: 400 })
     }
 
     const job = await getSyncJob(db, jobId)
@@ -34,11 +31,7 @@ export async function POST(_request, { params }) {
     }
 
     if (session.user.role === 'admin') {
-      const hasAccess = await verifyAdminStoreAccess(
-        db,
-        session.user.id,
-        job.store_id
-      )
+      const hasAccess = await verifyAdminStoreAccess(db, session.user.id, job.store_id)
       if (!hasAccess) {
         return NextResponse.json(
           { error: 'Unauthorized access to this store' },
@@ -47,24 +40,16 @@ export async function POST(_request, { params }) {
       }
     }
 
-    if (job.status === JOB_STATUS.COMPLETED || job.status === JOB_STATUS.FAILED) {
-      return NextResponse.json(
-        { error: 'Job already finished' },
-        { status: 400 }
-      )
-    }
-
-    const updated = await updateSyncJob(db, jobId, {
-      status: JOB_STATUS.PAUSED,
-      cancel_requested: true,
-      message: `Paused at ${job.current_count || 0} / ${job.total_count || 0}`,
+    const result = await finalizeRalawiseSync({
+      jobId,
+      db,
     })
 
-    return NextResponse.json(serializeJob(updated))
+    return NextResponse.json(result)
   } catch (error) {
-    console.error('Ralawise sync stop failed:', error)
+    console.error('Finalize sync processing error:', error)
     return NextResponse.json(
-      { error: error.message || 'Failed to stop sync' },
+      { error: error.message || 'Finalize sync processing failed' },
       { status: 500 }
     )
   }

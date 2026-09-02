@@ -31,14 +31,12 @@ async function importProductRows({
   vendorCache = null,
   onProgress = null,
   startIndex = 0,
-  initialNewCount = 0,
-  initialUpdatedCount = 0,
   shouldContinue = null,
 }) {
   const errors = []
   let processedCount = 0
-  let newCount = initialNewCount
-  let updatedCount = initialUpdatedCount
+  let newCount = 0
+  let updatedCount = 0
   const cache = vendorCache || createVendorCache()
   const defaultVendorId = parseInt(vendorId, 10)
   const total = rows.length
@@ -199,13 +197,11 @@ async function importVariationRows({
   batchSize = DEFAULT_BATCH_SIZE,
   onProgress = null,
   startIndex = 0,
-  initialNewCount = 0,
-  initialUpdatedCount = 0,
   shouldContinue = null,
 }) {
   const errors = []
-  let newCount = initialNewCount
-  let updatedCount = initialUpdatedCount
+  let newCount = 0
+  let updatedCount = 0
   let processedCount = 0
   const total = rows.length
   const beginAt = Math.max(0, Math.min(startIndex || 0, rows.length))

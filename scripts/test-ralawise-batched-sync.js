@@ -177,8 +177,8 @@ ${sku5},${sku5}_GRN_M,Green,Green,M,9.00,8.50,8.00`
 
     const finalJob = await getSyncJob(db, jobId)
     assert(finalJob.status === JOB_STATUS.COMPLETED, 'Final DB job record is completed')
-    assert(finalJob.parent_processed === 5, `Final parent_processed is 5 (got ${finalJob.parent_processed})`)
-    assert(finalJob.variation_processed === 10, `Final variation_processed is 10 (got ${finalJob.variation_processed})`)
+    assert(Number(finalJob.parent_processed) === 5, `Final parent_processed is 5 (got ${finalJob.parent_processed})`)
+    assert(Number(finalJob.variation_processed) === 10, `Final variation_processed is 10 (got ${finalJob.variation_processed})`)
 
     // 11. Idempotent Retry Test
     console.log('\n--- Test 11: Idempotent Re-Run Safety Check ---')

@@ -31,8 +31,8 @@ const {
   serializeJob,
 } = require('./ralawise-sync-jobs')
 
-const DEFAULT_PARENT_BATCH_SIZE = 250
-const DEFAULT_VARIATION_BATCH_SIZE = 500
+const DEFAULT_PARENT_BATCH_SIZE = 50
+const DEFAULT_VARIATION_BATCH_SIZE = 150
 
 /**
  * Phase 1: Prepare
@@ -226,8 +226,9 @@ async function processParentBatch({ jobId, db, batchSize = DEFAULT_PARENT_BATCH_
     return { paused: true, job: serializeJob(job) }
   }
 
+  const effectiveBatchSize = Math.max(1, Math.min(Number(batchSize) || DEFAULT_PARENT_BATCH_SIZE, 100))
   const start = Number(job.parent_cursor) || 0
-  const payloadSlice = await getParentBatchSlice(db, jobId, start, batchSize)
+  const payloadSlice = await getParentBatchSlice(db, jobId, start, effectiveBatchSize)
   if (!payloadSlice) throw new Error(`Job ${jobId} payloads not found`)
 
   const batchRows = payloadSlice.rows || []
@@ -266,6 +267,7 @@ async function processParentBatch({ jobId, db, batchSize = DEFAULT_PARENT_BATCH_
     db,
     rowOffset: start,
     startIndex: 0,
+    batchSize: effectiveBatchSize,
     initialNewCount: Number(job.products_new) || 0,
     initialUpdatedCount: Number(job.products_updated) || 0,
   })
@@ -319,8 +321,9 @@ async function processVariationBatch({ jobId, db, batchSize = DEFAULT_VARIATION_
     return { paused: true, job: serializeJob(job) }
   }
 
+  const effectiveBatchSize = Math.max(1, Math.min(Number(batchSize) || DEFAULT_VARIATION_BATCH_SIZE, 300))
   const start = Number(job.variation_cursor) || 0
-  const payloadSlice = await getVariationBatchSlice(db, jobId, start, batchSize)
+  const payloadSlice = await getVariationBatchSlice(db, jobId, start, effectiveBatchSize)
   if (!payloadSlice) throw new Error(`Job ${jobId} payloads not found`)
 
   const batchRows = payloadSlice.rows || []
@@ -354,6 +357,7 @@ async function processVariationBatch({ jobId, db, batchSize = DEFAULT_VARIATION_
     db,
     rowOffset: start,
     startIndex: 0,
+    batchSize: effectiveBatchSize,
     initialNewCount: Number(job.variations_new) || 0,
     initialUpdatedCount: Number(job.variations_updated) || 0,
   })

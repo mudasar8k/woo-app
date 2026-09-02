@@ -6,6 +6,9 @@ import { Check, Circle, Loader2, Pause, Play, RefreshCw, X } from 'lucide-react'
 
 const STORAGE_KEY = (storeId) => `ralawise-sync-job:${storeId}`
 
+const PARENT_BATCH_SIZE = 50
+const VARIATION_BATCH_SIZE = 150
+
 const STEPS = [
   { key: 'connecting', label: 'Connecting to Ralawise' },
   { key: 'downloading', label: 'Downloading latest files' },
@@ -138,14 +141,14 @@ export default function RalawiseSyncButton({
     let currentPhase = startingPhase
 
     try {
-      // 1. Process Parent Batches
+      // 1. Process Parent Batches (50 items/batch for serverless safety)
       while (currentPhase === 'parents') {
         if (abortRef.current) break
 
         const res = await fetch(`/api/ralawise/sync/${jobId}/batch-parents`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ batchSize: 250 }),
+          body: JSON.stringify({ batchSize: PARENT_BATCH_SIZE }),
         })
         const data = await safeFetchJson(res)
         if (!data.ok) throw new Error(data.error || 'Parent batch failed')
@@ -159,14 +162,14 @@ export default function RalawiseSyncButton({
         currentPhase = data.phase
       }
 
-      // 2. Process Variation Batches
+      // 2. Process Variation Batches (150 items/batch for serverless safety)
       while (currentPhase === 'variations') {
         if (abortRef.current) break
 
         const res = await fetch(`/api/ralawise/sync/${jobId}/batch-variations`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ batchSize: 500 }),
+          body: JSON.stringify({ batchSize: VARIATION_BATCH_SIZE }),
         })
         const data = await safeFetchJson(res)
         if (!data.ok) throw new Error(data.error || 'Variation batch failed')

@@ -17,8 +17,7 @@ class ImportPausedError extends Error {
 }
 
 /**
- * Upsert product rows by SKU.
- * New products keep DB default status (pending). Updates preserve existing status.
+ * Upsert product rows by SKU with bulk-prefetched lookups for serverless performance.
  *
  * @returns {{ processedCount: number, newCount: number, updatedCount: number, errors: string[], paused?: boolean }}
  */
@@ -54,6 +53,23 @@ async function importProductRows({
     }
 
     const batchEnd = Math.min(batchStart + batchSize, rows.length)
+    const currentBatchSlice = rows.slice(batchStart, batchEnd)
+
+    // Pre-fetch all existing product IDs for this batch in a single query (eliminates N+1 selects)
+    const batchSkus = currentBatchSlice
+      .map((r) => String(r.sku || r.code || r.Code || '').trim())
+      .filter(Boolean)
+
+    const skuToIdMap = new Map()
+    if (batchSkus.length > 0) {
+      const existingRes = await db.query(
+        'SELECT id, sku FROM products WHERE sku = ANY($1::text[])',
+        [batchSkus]
+      )
+      for (const row of existingRes.rows) {
+        skuToIdMap.set(String(row.sku).trim(), row.id)
+      }
+    }
 
     for (let i = batchStart; i < batchEnd; i++) {
       const globalRowIndex = rowOffset + i
@@ -73,13 +89,10 @@ async function importProductRows({
           db,
         })
 
-        const existing = await db.query(
-          'SELECT id FROM products WHERE sku = $1 LIMIT 1',
-          [productData.sku]
-        )
+        const trimmedSku = String(productData.sku).trim()
+        const existingId = skuToIdMap.get(trimmedSku)
 
-        if (existing.rows.length > 0) {
-          const productId = existing.rows[0].id
+        if (existingId) {
           await db.query(
             `UPDATE products SET
               csv_upload_id = $1, vendor_id = $2, name = $3, description = $4, short_description = $5,
@@ -109,12 +122,12 @@ async function importProductRows({
               productData.weight,
               productData.size_description,
               productData.length_fit,
-              productId,
+              existingId,
             ]
           )
           updatedCount++
         } else {
-          await db.query(
+          const insertRes = await db.query(
             `INSERT INTO products (
               csv_upload_id, vendor_id, sku, name, description, short_description,
               price, regular_price, sale_price, stock_quantity, manage_stock,
@@ -146,6 +159,9 @@ async function importProductRows({
               productData.length_fit,
             ]
           )
+          if (insertRes.rows.length > 0) {
+            skuToIdMap.set(trimmedSku, insertRes.rows[0].id)
+          }
           newCount++
         }
         processedCount++
@@ -171,7 +187,7 @@ async function importProductRows({
 }
 
 /**
- * Upsert variation rows by (parent product, sku).
+ * Upsert variation rows by (parent product, sku) with bulk-prefetched lookups for serverless performance.
  *
  * @returns {{ processedCount: number, newCount: number, updatedCount: number, errors: string[] }}
  */
@@ -203,6 +219,41 @@ async function importVariationRows({
     }
 
     const batchEnd = Math.min(batchStart + batchSize, rows.length)
+    const currentBatchSlice = rows.slice(batchStart, batchEnd)
+
+    // Bulk pre-fetch parent products and existing variations (eliminates 2x N+1 selects)
+    const parentSkus = [
+      ...new Set(
+        currentBatchSlice
+          .map((r) => String(r.parent_sku || r.primary_sku || r.Primary_SKU || '').trim())
+          .filter(Boolean)
+      ),
+    ]
+    const varSkus = currentBatchSlice
+      .map((r) => String(r.sku || r.SKU || '').trim())
+      .filter(Boolean)
+
+    const parentSkuToIdMap = new Map()
+    if (parentSkus.length > 0) {
+      const parentRes = await db.query(
+        'SELECT id, sku FROM products WHERE sku = ANY($1::text[])',
+        [parentSkus]
+      )
+      for (const row of parentRes.rows) {
+        parentSkuToIdMap.set(String(row.sku).trim(), row.id)
+      }
+    }
+
+    const varSkuToIdMap = new Map()
+    if (varSkus.length > 0) {
+      const varRes = await db.query(
+        'SELECT id, sku, product_id FROM product_variations WHERE sku = ANY($1::text[])',
+        [varSkus]
+      )
+      for (const row of varRes.rows) {
+        varSkuToIdMap.set(String(row.sku).trim(), row.id)
+      }
+    }
 
     for (let i = batchStart; i < batchEnd; i++) {
       const globalRowIndex = rowOffset + i
@@ -215,24 +266,18 @@ async function importVariationRows({
         }
 
         const variationData = parseVariationRow(row)
+        const parentSku = String(variationData.parent_sku).trim()
+        const productId = parentSkuToIdMap.get(parentSku)
 
-        const productResult = await db.query(
-          'SELECT id FROM products WHERE sku = $1 LIMIT 1',
-          [variationData.parent_sku]
-        )
-
-        if (productResult.rows.length === 0) {
+        if (!productId) {
           errors.push(
             `Row ${globalRowIndex + 1}: Parent product with SKU "${variationData.parent_sku}" not found`
           )
           continue
         }
 
-        const productId = productResult.rows[0].id
-        const existingVar = await db.query(
-          'SELECT id FROM product_variations WHERE product_id = $1 AND sku = $2 LIMIT 1',
-          [productId, variationData.sku]
-        )
+        const trimmedVarSku = String(variationData.sku).trim()
+        const existingVarId = varSkuToIdMap.get(trimmedVarSku)
 
         const imagesVal = variationData.images || variationData.image || null
         const imageVal =
@@ -242,7 +287,7 @@ async function importVariationRows({
             : null) ||
           null
 
-        if (existingVar.rows.length > 0) {
+        if (existingVarId) {
           await db.query(
             `UPDATE product_variations SET
               csv_upload_id = $1, parent_sku = $2, attributes = $3, size = $4, color = $5, price = $6,
@@ -265,17 +310,18 @@ async function importVariationRows({
               imageVal,
               variationData.tax_class,
               imagesVal,
-              existingVar.rows[0].id,
+              existingVarId,
             ]
           )
           updatedCount++
         } else {
-          await db.query(
+          const insertRes = await db.query(
             `INSERT INTO product_variations (
               product_id, csv_upload_id, parent_sku, sku, attributes, size, color,
               price, regular_price, sale_price, stock_quantity, manage_stock,
               stock_status, image, tax_class, images, status
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, 'pending')`,
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, 'pending')
+            RETURNING id`,
             [
               productId,
               csvUploadId,
@@ -295,6 +341,9 @@ async function importVariationRows({
               imagesVal,
             ]
           )
+          if (insertRes.rows.length > 0) {
+            varSkuToIdMap.set(trimmedVarSku, insertRes.rows[0].id)
+          }
           newCount++
         }
         processedCount++

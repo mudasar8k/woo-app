@@ -10,6 +10,7 @@ const {
   ensureJobsTable,
   getSyncJob,
   updateSyncJob,
+  createSyncJob,
   serializeJob,
   JOB_STATUS,
 } = require('../app/lib/ralawise-sync-jobs')
@@ -18,6 +19,7 @@ const {
   processParentBatch,
   processVariationBatch,
   finalizeRalawiseSync,
+  resumeRalawiseSync,
 } = require('../app/lib/ralawise-batch-importer')
 const { lastImportPaths } = require('../app/lib/ralawise-import')
 
@@ -148,9 +150,13 @@ ${sku5},${sku5}_GRN_M,Green,Green,M,9.00,8.50,8.00`
     const pausedCheck = await processVariationBatch({ jobId, db, batchSize: 4 })
     assert(pausedCheck.paused === true, 'processVariationBatch respects paused/cancel_requested state')
 
-    // 8. Resume Simulation
-    console.log('\n--- Test 8: Resume Simulation ---')
-    await updateSyncJob(db, jobId, { status: JOB_STATUS.IMPORTING_VARIATIONS, cancel_requested: false })
+    // 8. Explicit Resume Endpoint Simulation
+    console.log('\n--- Test 8: Explicit Resume Endpoint Simulation ---')
+    const resumedState = await resumeRalawiseSync({ jobId, db })
+    assert(resumedState.cancelRequested === false, 'resumeRalawiseSync clears cancelRequested to false')
+    assert(resumedState.status === JOB_STATUS.IMPORTING_VARIATIONS, 'Job status changes back to running (importing_variations)')
+    assert(resumedState.variationCursor === 4, `variationCursor preserved at 4 (got ${resumedState.variationCursor})`)
+
     const vBatch2 = await processVariationBatch({ jobId, db, batchSize: 4 })
     assert(vBatch2.variationProcessed === 8, `Resumed variation batch 2 reaches 8 processed (got ${vBatch2.variationProcessed})`)
     assert(vBatch2.hasMore === true, 'hasMore is true')
@@ -184,10 +190,51 @@ ${sku5},${sku5}_GRN_M,Green,Green,M,9.00,8.50,8.00`
     `)
     assert(dupCheck.rows.length === 0, 'Zero duplicate products created')
 
-    // Cleanup test products
+    // 12. Legacy Paused Job Resume (Cursor 3,550 preservation test)
+    console.log('\n--- Test 12: Legacy Paused Job State (3,550 preservation) ---')
+    const mockLegacyJob = await createSyncJob(db, { storeId, vendorId, userId })
+    await updateSyncJob(db, mockLegacyJob.id, {
+      status: JOB_STATUS.PAUSED,
+      step: 'importing_products',
+      phase: 'prepare',
+      current_count: 3550,
+      total_count: 4264,
+      cancel_requested: true,
+      parent_cursor: 0,
+      parent_processed: 0,
+      parent_total: 0,
+    })
+
+    const migratedResume = await resumeRalawiseSync({
+      jobId: mockLegacyJob.id,
+      db,
+      files: {
+        parentCsvText: sampleParentCsv,
+        variationsCsvText: sampleVarCsv,
+      },
+    })
+    assert(migratedResume.cancelRequested === false, 'Legacy resume clears cancel_requested')
+    assert(migratedResume.parentCursor === 3550, `Legacy resume preserves parent_cursor at 3550 (got ${migratedResume.parentCursor})`)
+    assert(migratedResume.parentProcessed === 3550, `Legacy resume preserves parent_processed at 3550 (got ${migratedResume.parentProcessed})`)
+    assert(migratedResume.parentTotal === 4264, `Legacy resume preserves parent_total at 4264 (got ${migratedResume.parentTotal})`)
+    assert(migratedResume.phase === 'parents', 'Legacy resume sets phase to parents')
+    assert(migratedResume.status === JOB_STATUS.IMPORTING_PRODUCTS, 'Legacy resume sets status to importing_products')
+
+    // Double resume idempotency test
+    const doubleResume = await resumeRalawiseSync({
+      jobId: mockLegacyJob.id,
+      db,
+      files: {
+        parentCsvText: sampleParentCsv,
+        variationsCsvText: sampleVarCsv,
+      },
+    })
+    assert(doubleResume.parentCursor === 3550, 'Double resume preserves existing cursor at 3550')
+
+    // Cleanup test fixtures
     await db.query(`DELETE FROM product_variations WHERE sku LIKE 'TBAT_${runId}_%'`)
     await db.query(`DELETE FROM products WHERE sku LIKE 'TBAT_${runId}_%'`)
-    await db.query(`DELETE FROM ralawise_sync_jobs WHERE id = $1`, [jobId])
+    await db.query(`DELETE FROM ralawise_sync_jobs WHERE id IN ($1, $2)`, [jobId, mockLegacyJob.id])
     console.log('Cleaned up test fixtures.')
 
   } catch (err) {

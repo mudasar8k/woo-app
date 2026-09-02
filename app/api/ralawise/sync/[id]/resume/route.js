@@ -1,18 +1,14 @@
-import { NextResponse, after } from 'next/server'
+import { NextResponse } from 'next/server'
 import db from '../../../../../lib/db'
 import { auth } from '../../../../auth/[...nextauth]/route'
 import {
   requireAdminOrSuperAdminApi,
   verifyAdminStoreAccess,
 } from '../../../../../lib/role-guards'
-import {
-  JOB_STATUS,
-  getSyncJob,
-  serializeJob,
-} from '../../../../../lib/ralawise-sync-jobs'
-import { runSyncJobWorker } from '../../../../../lib/ralawise-sync-runner'
+import { getSyncJob } from '../../../../../lib/ralawise-sync-jobs'
+import { resumeRalawiseSync } from '../../../../../lib/ralawise-batch-importer'
 
-export const maxDuration = 300
+export const maxDuration = 60
 export const runtime = 'nodejs'
 
 export async function POST(_request, { params }) {
@@ -48,22 +44,8 @@ export async function POST(_request, { params }) {
       }
     }
 
-    if (job.status !== JOB_STATUS.PAUSED) {
-      return NextResponse.json(
-        { error: 'Only paused jobs can be resumed' },
-        { status: 400 }
-      )
-    }
-
-    after(async () => {
-      await runSyncJobWorker(db, job, { resume: true })
-    })
-
-    return NextResponse.json({
-      ...serializeJob(job),
-      status: job.step || JOB_STATUS.CONNECTING,
-      message: 'Resuming…',
-    })
+    const result = await resumeRalawiseSync({ jobId, db })
+    return NextResponse.json(result)
   } catch (error) {
     console.error('Ralawise sync resume failed:', error)
     return NextResponse.json(

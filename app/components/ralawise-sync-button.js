@@ -124,7 +124,7 @@ export default function RalawiseSyncButton({
         const data = await res.json()
         if (!res.ok) throw new Error(data.error || 'Parent batch failed')
 
-        if (data.paused || data.job?.status === 'paused') {
+        if (data.paused || data.job?.status === 'paused' || data.job?.cancelRequested) {
           applyJob(data.job)
           return
         }
@@ -145,7 +145,7 @@ export default function RalawiseSyncButton({
         const data = await res.json()
         if (!res.ok) throw new Error(data.error || 'Variation batch failed')
 
-        if (data.paused || data.job?.status === 'paused') {
+        if (data.paused || data.job?.status === 'paused' || data.job?.cancelRequested) {
           applyJob(data.job)
           return
         }
@@ -266,11 +266,22 @@ export default function RalawiseSyncButton({
     setActionBusy(true)
     abortRef.current = false
     try {
-      const res = await fetch(`/api/ralawise/sync/${job.jobId}/status`)
+      const res = await fetch(`/api/ralawise/sync/${job.jobId}/resume`, {
+        method: 'POST',
+      })
       const data = await res.json()
-      if (!res.ok) throw new Error(data.error || 'Failed to get job status')
+      if (!res.ok) throw new Error(data.error || 'Failed to resume sync')
 
       applyJob(data)
+      try {
+        sessionStorage.setItem(
+          STORAGE_KEY(storeId),
+          JSON.stringify({ jobId: data.jobId })
+        )
+      } catch {
+        // ignore
+      }
+
       await runBatchLoop(job.jobId, data.phase || 'parents')
     } catch (err) {
       setError(err.message || 'Failed to resume sync')
@@ -317,7 +328,7 @@ export default function RalawiseSyncButton({
           onClick={handleSync}
         >
           <RefreshCw className={`h-4 w-4 mr-2 ${loading ? 'animate-spin' : ''}`} />
-          {loading ? 'Syncing from Ralawise�' : 'Sync from Ralawise'}
+          {loading ? 'Syncing from Ralawise...' : 'Sync from Ralawise'}
         </Button>
 
         {canStop && (
@@ -410,7 +421,7 @@ export default function RalawiseSyncButton({
                       }
                     >
                       {step.label}
-                      {state === 'active' ? '�' : ''}
+                      {state === 'active' ? '...' : ''}
                       {state === 'paused' ? ' (paused)' : ''}
                       {showCounts ? (
                         <span className="ml-1 font-normal text-gray-600">

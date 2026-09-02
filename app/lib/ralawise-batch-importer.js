@@ -43,7 +43,7 @@ async function prepareRalawiseSync({ storeId, vendorId, userId, db, files = null
     await updateSyncJob(db, job.id, {
       status: JOB_STATUS.CONNECTING,
       step: JOB_STATUS.CONNECTING,
-      message: 'Connecting to Ralawise�',
+      message: 'Connecting to Ralawise...',
     })
 
     let productsText = null
@@ -58,7 +58,7 @@ async function prepareRalawiseSync({ storeId, vendorId, userId, db, files = null
       await updateSyncJob(db, job.id, {
         status: JOB_STATUS.DOWNLOADING,
         step: JOB_STATUS.DOWNLOADING,
-        message: 'Downloading supplier catalogs�',
+        message: 'Downloading supplier catalogs...',
       })
 
       const catalog = await fetchRalawiseCatalog()
@@ -74,7 +74,7 @@ async function prepareRalawiseSync({ storeId, vendorId, userId, db, files = null
     await updateSyncJob(db, job.id, {
       status: JOB_STATUS.DELTA,
       step: JOB_STATUS.DELTA,
-      message: 'Comparing against previous import�',
+      message: 'Comparing against previous import...',
     })
 
     const productRows = await parseCSV(productsText)
@@ -175,7 +175,7 @@ async function prepareRalawiseSync({ storeId, vendorId, userId, db, files = null
       status: initialStep,
       step: initialStep,
       phase: initialPhase,
-      message: `Importing products� (0 / ${productRowsToImport.length})`,
+      message: `Importing products... (0 / ${productRowsToImport.length})`,
       total_count: Number(productRowsToImport.length + variationRowsToImport.length) || 0,
       current_count: 0,
       parent_total: Number(productRowsToImport.length) || 0,
@@ -241,8 +241,8 @@ async function processParentBatch({ jobId, db, batchSize = DEFAULT_PARENT_BATCH_
       step: nextStep,
       status: nextStep,
       message: nextPhase === 'variations'
-        ? `Importing variations� (${Number(job.variation_processed) || 0} / ${Number(job.variation_total) || 0})`
-        : 'Finalizing sync�',
+        ? `Importing variations... (${Number(job.variation_processed) || 0} / ${Number(job.variation_total) || 0})`
+        : 'Finalizing sync...',
     })
     if (job.csv_upload_parent_id) {
       await finalizeCsvUpload(db, job.csv_upload_parent_id, Number(job.parent_processed) || total, [])
@@ -283,8 +283,8 @@ async function processParentBatch({ jobId, db, batchSize = DEFAULT_PARENT_BATCH_
     step: nextStep,
     status: nextStep,
     message: isLastBatch
-      ? (nextPhase === 'variations' ? `Importing variations� (0 / ${job.variation_total})` : 'Finalizing sync�')
-      : `Importing products� (${newProcessed} / ${total})`,
+      ? (nextPhase === 'variations' ? `Importing variations... (0 / ${job.variation_total})` : 'Finalizing sync...')
+      : `Importing products... (${newProcessed} / ${total})`,
     parent_processed: newProcessed,
     parent_cursor: end,
     products_new: (Number(job.products_new) || 0) + (Number(result.newCount) || 0),
@@ -333,7 +333,7 @@ async function processVariationBatch({ jobId, db, batchSize = DEFAULT_VARIATION_
       phase: 'finalize',
       step: JOB_STATUS.FINALIZE,
       status: JOB_STATUS.FINALIZE,
-      message: 'Finalizing sync�',
+      message: 'Finalizing sync...',
     })
     if (job.csv_upload_var_id) {
       await finalizeCsvUpload(db, job.csv_upload_var_id, Number(job.variation_processed) || total, [])
@@ -371,8 +371,8 @@ async function processVariationBatch({ jobId, db, batchSize = DEFAULT_VARIATION_
     step: nextStep,
     status: nextStep,
     message: isLastBatch
-      ? 'Finalizing sync�'
-      : `Importing variations� (${newProcessed} / ${total})`,
+      ? 'Finalizing sync...'
+      : `Importing variations... (${newProcessed} / ${total})`,
     variation_processed: newProcessed,
     variation_cursor: end,
     variations_new: (Number(job.variations_new) || 0) + (Number(result.newCount) || 0),
@@ -431,11 +431,116 @@ async function finalizeRalawiseSync({ jobId, db }) {
   }
 }
 
+/**
+ * Resume a paused/cancelled sync job safely.
+ * Clears cancel_requested, preserves existing cursors, repopulates payloads if missing.
+ */
+async function resumeRalawiseSync({ jobId, db, files = null }) {
+  const job = await getSyncJob(db, jobId)
+  if (!job) throw new Error(`Job ${jobId} not found`)
+
+  if (job.status === JOB_STATUS.COMPLETED) {
+    throw new Error('Job is already completed')
+  }
+
+  let phase = job.phase || 'parents'
+  let parentCursor = Number(job.parent_cursor) || 0
+  let parentProcessed = Number(job.parent_processed) || 0
+  let parentTotal = Number(job.parent_total) || 0
+  let varCursor = Number(job.variation_cursor) || 0
+  let varProcessed = Number(job.variation_processed) || 0
+  let varTotal = Number(job.variation_total) || 0
+
+  // Migrate state if legacy job paused without modern cursor columns populated
+  if (parentCursor === 0 && Number(job.current_count) > 0 && job.step === 'importing_products') {
+    parentCursor = Number(job.current_count)
+    parentProcessed = Number(job.current_count)
+    if (parentTotal === 0 && Number(job.total_count) > 0) {
+      parentTotal = Number(job.total_count)
+    }
+    phase = 'parents'
+  } else if (varCursor === 0 && Number(job.current_count) > 0 && job.step === 'importing_variations') {
+    varCursor = Number(job.current_count)
+    varProcessed = Number(job.current_count)
+    phase = 'variations'
+  }
+
+  // Verify / repopulate payloads if missing
+  let payloads = await getJobPayloads(db, jobId)
+  if (!payloads || (!payloads.parentRows?.length && !payloads.variationRows?.length)) {
+    let parentCsvText = files?.parentCsvText
+    let variationsCsvText = files?.variationsCsvText
+
+    if (!parentCsvText || !variationsCsvText) {
+      const catalog = await fetchRalawiseCatalog()
+      parentCsvText = catalog.parentCsvText
+      variationsCsvText = catalog.variationsCsvText
+    }
+
+    const productRows = await parseCSV(parentCsvText)
+    const variationRows = await parseCSV(variationsCsvText)
+
+    const { lastImportPaths } = require('./ralawise-import')
+    const fs = require('fs')
+    const paths = lastImportPaths(job.vendor_id)
+    const lastParentText = fs.existsSync(paths.parentCsvPath)
+      ? fs.readFileSync(paths.parentCsvPath, 'utf8')
+      : null
+    const lastVarText = fs.existsSync(paths.variationsCsvPath)
+      ? fs.readFileSync(paths.variationsCsvPath, 'utf8')
+      : null
+
+    const lastProductRows = lastParentText ? await parseCSV(lastParentText) : null
+    const lastVarRows = lastVarText ? await parseCSV(lastVarText) : null
+
+    const productDiff = diffRows(productRows, lastProductRows, (row) => String(row.sku || row.code || '').trim())
+    const variationDiff = diffRows(variationRows, lastVarRows, (row) => `${String(row.parent_sku || row.primary_sku || '').trim()}|${String(row.sku || '').trim()}`)
+
+    const productRowsToImport = productDiff.changedRows || []
+    const variationRowsToImport = variationDiff.changedRows || []
+
+    const effectiveParentRows = productRowsToImport.length > 0 ? productRowsToImport : productRows
+    const effectiveVarRows = variationRowsToImport.length > 0 ? variationRowsToImport : variationRows
+
+    await saveJobPayloads(db, jobId, {
+      parentRows: effectiveParentRows,
+      variationRows: effectiveVarRows,
+      rawParentText: parentCsvText,
+      rawVarText: variationsCsvText,
+    })
+
+    if (parentTotal === 0) parentTotal = effectiveParentRows.length
+    if (varTotal === 0) varTotal = effectiveVarRows.length
+  }
+
+  if (phase === 'prepare') phase = 'parents'
+  const nextStatus = phase === 'variations' ? JOB_STATUS.IMPORTING_VARIATIONS : (phase === 'finalize' ? JOB_STATUS.FINALIZE : JOB_STATUS.IMPORTING_PRODUCTS)
+  const nextStep = nextStatus
+
+  const updated = await updateSyncJob(db, jobId, {
+    status: nextStatus,
+    step: nextStep,
+    phase,
+    cancel_requested: false,
+    parent_cursor: parentCursor,
+    parent_processed: parentProcessed,
+    parent_total: parentTotal,
+    variation_cursor: varCursor,
+    variation_processed: varProcessed,
+    variation_total: varTotal,
+    message: `Resuming at ${parentProcessed} / ${parentTotal}...`,
+    error_message: null,
+  })
+
+  return serializeJob(updated)
+}
+
 module.exports = {
   prepareRalawiseSync,
   processParentBatch,
   processVariationBatch,
   finalizeRalawiseSync,
+  resumeRalawiseSync,
   DEFAULT_PARENT_BATCH_SIZE,
   DEFAULT_VARIATION_BATCH_SIZE,
 }

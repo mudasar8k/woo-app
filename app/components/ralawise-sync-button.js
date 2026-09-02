@@ -67,15 +67,71 @@ async function safeFetchJson(res) {
   if (!data) {
     const rawText = await res.text().catch(() => '')
     const cleanText = rawText.replace(/<[^>]*>?/gm, ' ').replace(/\s+/g, ' ').trim()
-    const errorMsg = cleanText ? `Server returned (${res.status}): ${cleanText.slice(0, 120)}` : `Request failed with HTTP status ${res.status}`
+    const errorMsg = cleanText
+      ? `Server returned (${res.status}): ${cleanText.slice(0, 120)}`
+      : `Request failed with HTTP status ${res.status}`
     return { ok: false, error: errorMsg, status: res.status }
   }
 
   if (!res.ok) {
-    return { ok: false, error: data.error || data.message || `Request failed with status ${res.status}`, ...data }
+    return {
+      ok: false,
+      error: data.error || data.message || `Request failed with status ${res.status}`,
+      status: res.status,
+      ...data,
+    }
   }
 
-  return { ok: true, ...data }
+  return { ok: true, status: res.status, ...data }
+}
+
+async function fetchWithRetry(url, options = {}, maxRetries = 3) {
+  let attempt = 0
+  let delay = 1000
+
+  while (attempt < maxRetries) {
+    attempt++
+    try {
+      const res = await fetch(url, options)
+      const data = await safeFetchJson(res)
+
+      if (data.ok) {
+        return data
+      }
+
+      const status = res.status || data.status
+      const isTransient =
+        status === 502 || status === 503 || status === 504 || status === 500
+
+      if (isTransient && attempt < maxRetries) {
+        console.warn(
+          `Transient server error (${status}), retrying attempt ${attempt}/${maxRetries} in ${delay}ms...`
+        )
+        await new Promise((resolve) => setTimeout(resolve, delay))
+        delay *= 2
+        continue
+      }
+
+      return data
+    } catch (err) {
+      if (attempt < maxRetries) {
+        console.warn(
+          `Network fetch failure, retrying attempt ${attempt}/${maxRetries} in ${delay}ms...`,
+          err.message
+        )
+        await new Promise((resolve) => setTimeout(resolve, delay))
+        delay *= 2
+        continue
+      }
+      return {
+        ok: false,
+        error: err.message || 'Network connection failed',
+        isNetworkError: true,
+      }
+    }
+  }
+
+  return { ok: false, error: 'Maximum retries exceeded', isNetworkError: true }
 }
 
 function StepIcon({ state }) {
@@ -145,13 +201,23 @@ export default function RalawiseSyncButton({
       while (currentPhase === 'parents') {
         if (abortRef.current) break
 
-        const res = await fetch(`/api/ralawise/sync/${jobId}/batch-parents`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ batchSize: PARENT_BATCH_SIZE }),
-        })
-        const data = await safeFetchJson(res)
-        if (!data.ok) throw new Error(data.error || 'Parent batch failed')
+        const data = await fetchWithRetry(
+          `/api/ralawise/sync/${jobId}/batch-parents`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ batchSize: PARENT_BATCH_SIZE }),
+          }
+        )
+
+        if (!data.ok) {
+          const statusRes = await fetch(`/api/ralawise/sync/${jobId}/status`).catch(() => null)
+          if (statusRes && statusRes.ok) {
+            const statusData = await safeFetchJson(statusRes)
+            if (statusData.ok) applyJob(statusData)
+          }
+          throw new Error(data.error || 'Parent batch failed')
+        }
 
         if (data.paused || data.job?.status === 'paused' || data.job?.cancelRequested) {
           applyJob(data.job)
@@ -166,13 +232,23 @@ export default function RalawiseSyncButton({
       while (currentPhase === 'variations') {
         if (abortRef.current) break
 
-        const res = await fetch(`/api/ralawise/sync/${jobId}/batch-variations`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ batchSize: VARIATION_BATCH_SIZE }),
-        })
-        const data = await safeFetchJson(res)
-        if (!data.ok) throw new Error(data.error || 'Variation batch failed')
+        const data = await fetchWithRetry(
+          `/api/ralawise/sync/${jobId}/batch-variations`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ batchSize: VARIATION_BATCH_SIZE }),
+          }
+        )
+
+        if (!data.ok) {
+          const statusRes = await fetch(`/api/ralawise/sync/${jobId}/status`).catch(() => null)
+          if (statusRes && statusRes.ok) {
+            const statusData = await safeFetchJson(statusRes)
+            if (statusData.ok) applyJob(statusData)
+          }
+          throw new Error(data.error || 'Variation batch failed')
+        }
 
         if (data.paused || data.job?.status === 'paused' || data.job?.cancelRequested) {
           applyJob(data.job)
@@ -187,18 +263,21 @@ export default function RalawiseSyncButton({
       if (currentPhase === 'finalize') {
         if (abortRef.current) return
 
-        const res = await fetch(`/api/ralawise/sync/${jobId}/finalize`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-        })
-        const data = await safeFetchJson(res)
+        const data = await fetchWithRetry(
+          `/api/ralawise/sync/${jobId}/finalize`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+          }
+        )
+
         if (!data.ok) throw new Error(data.error || 'Finalize failed')
 
         applyJob(data.job)
       }
     } catch (err) {
       console.error('Batched sync error:', err)
-      setError(err.message || 'Sync failed')
+      setError(err.message || 'Sync encountered an error')
       setLoading(false)
     }
   }, [applyJob])

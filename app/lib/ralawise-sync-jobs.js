@@ -13,6 +13,7 @@ const JOB_STATUS = {
   PAUSED: 'paused',
   COMPLETED: 'completed',
   FAILED: 'failed',
+  ABANDONED: 'abandoned',
 }
 
 const ALLOWED_STATUSES = [
@@ -26,6 +27,7 @@ const ALLOWED_STATUSES = [
   'paused',
   'completed',
   'failed',
+  'abandoned',
 ]
 
 class SyncPausedError extends Error {
@@ -168,7 +170,8 @@ async function ensureJobsTable(db) {
       'finalize',
       'paused',
       'completed',
-      'failed'
+      'failed',
+      'abandoned'
     ))
   `)
   await db.query(CREATE_INDEX_SQL)
@@ -282,7 +285,11 @@ async function getActiveSyncJobForStore(db, storeId) {
   )
   const row = result.rows[0]
   if (!row) return null
-  if (row.status === JOB_STATUS.COMPLETED || row.status === JOB_STATUS.FAILED) return null
+  if (
+    row.status === JOB_STATUS.COMPLETED ||
+    row.status === JOB_STATUS.FAILED ||
+    row.status === JOB_STATUS.ABANDONED
+  ) return null
   return row
 }
 
@@ -413,7 +420,11 @@ function serializeJob(row) {
  */
 async function assertJobNotPaused(db, jobId) {
   const job = await getSyncJob(db, jobId)
-  if (job?.status === JOB_STATUS.PAUSED || job?.cancel_requested) {
+  if (
+    job?.status === JOB_STATUS.PAUSED ||
+    job?.status === JOB_STATUS.ABANDONED ||
+    job?.cancel_requested
+  ) {
     throw new SyncPausedError(
       job.message || 'Sync paused - click Resume to continue'
     )

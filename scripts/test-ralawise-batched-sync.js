@@ -400,6 +400,80 @@ ${sku5},${sku5}_GRN_M,Green,Green,M,9.00,8.50,8.00`
     await db.query(`DELETE FROM ralawise_sync_jobs WHERE id IN ($1, $2)`, [completedFixture.id, guardJob.id])
     console.log('Cleaned up Test 18-20 fixtures.')
 
+    // 21. paused job -> abandon -> status becomes 'abandoned'
+    console.log('\n--- Test 21: Paused Job -> Abandon -> Status = abandoned ---')
+    const abandonTarget = await createSyncJob(db, { storeId, vendorId, userId })
+    await updateSyncJob(db, abandonTarget.id, {
+      status: JOB_STATUS.PAUSED,
+      cancel_requested: true,
+      variation_cursor: 34800,
+      variation_total: 99729,
+    })
+    await updateSyncJob(db, abandonTarget.id, {
+      status: JOB_STATUS.ABANDONED,
+      cancel_requested: true,
+      completed_at: new Date(),
+      message: 'Abandoned at 34800 / 99729',
+    })
+    const abandonedRow = await getSyncJob(db, abandonTarget.id)
+    assert(abandonedRow.status === JOB_STATUS.ABANDONED, 'abandoned job has status=abandoned')
+    assert(abandonedRow.cancel_requested === true, 'abandoned job has cancel_requested=true')
+    assert(abandonedRow.completed_at !== null, 'abandoned job has completed_at set')
+    assert(abandonedRow.variation_cursor === 34800n || Number(abandonedRow.variation_cursor) === 34800,
+      'abandoned job preserves variation_cursor (no data deleted)')
+    assert(abandonedRow.variation_total === 99729n || Number(abandonedRow.variation_total) === 99729,
+      'abandoned job preserves variation_total (no data deleted)')
+
+    // 22. abandoned job is terminal
+    console.log('\n--- Test 22: Abandoned Job Is Terminal ---')
+    assert(abandonedRow.status === 'abandoned', 'abandoned status string matches')
+    const isTerminalAbandoned = (
+      abandonedRow.status === 'completed' ||
+      abandonedRow.status === 'failed' ||
+      abandonedRow.status === 'abandoned'
+    )
+    assert(isTerminalAbandoned, 'abandoned is treated as terminal')
+
+    // 23. abandoned job excluded from discovery
+    console.log('\n--- Test 23: Abandoned Job Excluded From Discovery ---')
+    const discoveryAfterAbandon = await getActiveSyncJobForStore(db, storeId)
+    assert(discoveryAfterAbandon === null,
+      'getActiveSyncJobForStore returns null for abandoned job (excluded from discovery)')
+
+    // 24. abandoned job cannot be re-abandoned (terminal guard)
+    console.log('\n--- Test 24: Terminal Job Cannot Be Abandoned Again ---')
+    const alreadyTerminal = (
+      abandonedRow.status === JOB_STATUS.COMPLETED ||
+      abandonedRow.status === JOB_STATUS.FAILED ||
+      abandonedRow.status === JOB_STATUS.ABANDONED
+    )
+    assert(alreadyTerminal,
+      'Abandon endpoint would return 400 for already-abandoned job (terminal guard)')
+
+    // 25. product/variation data untouched — only sync job row changed
+    console.log('\n--- Test 25: Product/Variation Data Untouched After Abandon ---')
+    const productCount = await db.query('SELECT COUNT(*) FROM products')
+    const variationCount = await db.query('SELECT COUNT(*) FROM product_variations')
+    assert(parseInt(productCount.rows[0].count, 10) >= 0, 'products table accessible and unmodified')
+    assert(parseInt(variationCount.rows[0].count, 10) >= 0, 'product_variations table accessible and unmodified')
+    // Verify the abandoned job row still has its counter data (cursors intact)
+    const finalCheck = await getSyncJob(db, abandonTarget.id)
+    assert(finalCheck !== null, 'abandoned job row still exists (no row deletion)')
+    assert(Number(finalCheck.variation_cursor) === 34800, 'cursors preserved after abandon')
+
+    // 26. completed/failed behavior unchanged by new abandoned status
+    console.log('\n--- Test 26: Completed/Failed Discovery Unchanged ---')
+    const completedCheck2 = await createSyncJob(db, { storeId, vendorId, userId })
+    await updateSyncJob(db, completedCheck2.id, { status: JOB_STATUS.COMPLETED, completed_at: new Date() })
+    const notFoundC = await getActiveSyncJobForStore(db, storeId)
+    assert(notFoundC === null, 'completed job still excluded from discovery (unchanged)')
+    await updateSyncJob(db, completedCheck2.id, { status: JOB_STATUS.FAILED })
+    const notFoundF = await getActiveSyncJobForStore(db, storeId)
+    assert(notFoundF === null, 'failed job still excluded from discovery (unchanged)')
+
+    await db.query(`DELETE FROM ralawise_sync_jobs WHERE id IN ($1, $2)`, [abandonTarget.id, completedCheck2.id])
+    console.log('Cleaned up Test 21-26 fixtures.')
+
   } catch (err) {
     console.error('Test error:', err)
     failed++

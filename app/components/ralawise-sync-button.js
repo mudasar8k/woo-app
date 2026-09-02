@@ -45,7 +45,7 @@ function stepIndex(status) {
 }
 
 function isTerminal(status) {
-  return status === 'completed' || status === 'failed'
+  return status === 'completed' || status === 'failed' || status === 'abandoned'
 }
 
 function isRunning(status) {
@@ -426,13 +426,39 @@ export default function RalawiseSyncButton({
     }
   }
 
+  const handleAbandon = async () => {
+    if (!job?.jobId) return
+    const confirmed = window.confirm(
+      'Discard this paused sync? Already imported data will remain. This only closes the sync job.'
+    )
+    if (!confirmed) return
+    setActionBusy(true)
+    try {
+      const res = await fetch(`/api/ralawise/sync/${job.jobId}/abandon`, {
+        method: 'POST',
+      })
+      const data = await safeFetchJson(res)
+      if (data.ok) {
+        applyJob(data.job)
+        try { sessionStorage.removeItem(STORAGE_KEY(storeId)) } catch {}
+      } else {
+        setError(data.error || 'Failed to discard sync')
+      }
+    } catch (err) {
+      setError(err.message || 'Failed to discard sync')
+    } finally {
+      setActionBusy(false)
+    }
+  }
+
   const status = job?.status || 'idle'
   const currentStepIdx = stepIndex(status)
   const result = job?.result
-  const showProgress = status !== 'idle'
+  const showProgress = status !== 'idle' && status !== 'abandoned'
 
   const canStop = isRunning(status) && !actionBusy
   const canResume = status === 'paused' && !actionBusy && !loading
+  const canDiscard = status === 'paused' && !actionBusy && !loading
 
   return (
     <div className={compact ? 'space-y-2' : 'space-y-3'}>
@@ -492,6 +518,19 @@ export default function RalawiseSyncButton({
             Resume
           </Button>
         )}
+
+        {canDiscard && (
+          <Button
+            type="button"
+            variant="outline"
+            className="shrink-0 border-red-300 text-red-700 hover:bg-red-50"
+            disabled={actionBusy}
+            onClick={handleAbandon}
+          >
+            <X className="h-4 w-4 mr-1" />
+            Discard
+          </Button>
+        )}
       </div>
 
       {showProgress && job && (
@@ -500,6 +539,12 @@ export default function RalawiseSyncButton({
             <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1">
               Paused at {(job.current || 0).toLocaleString()} /{' '}
               {(job.total || 0).toLocaleString()}. Click Resume to continue.
+            </p>
+          )}
+          {status === 'abandoned' && (
+            <p className="text-xs text-gray-600 bg-gray-100 border border-gray-200 rounded px-2 py-1">
+              Sync discarded at {(job.current || 0).toLocaleString()} /{' '}
+              {(job.total || 0).toLocaleString()}. Already imported data is unaffected.
             </p>
           )}
           <ol className="space-y-2">

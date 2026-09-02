@@ -49,6 +49,32 @@ function isRunning(status) {
   return ACTIVE_STATUSES.has(status)
 }
 
+async function safeFetchJson(res) {
+  const contentType = res.headers.get('content-type') || ''
+  let data = null
+
+  if (contentType.includes('application/json')) {
+    try {
+      data = await res.json()
+    } catch {
+      data = null
+    }
+  }
+
+  if (!data) {
+    const rawText = await res.text().catch(() => '')
+    const cleanText = rawText.replace(/<[^>]*>?/gm, ' ').replace(/\s+/g, ' ').trim()
+    const errorMsg = cleanText ? `Server returned (${res.status}): ${cleanText.slice(0, 120)}` : `Request failed with HTTP status ${res.status}`
+    return { ok: false, error: errorMsg, status: res.status }
+  }
+
+  if (!res.ok) {
+    return { ok: false, error: data.error || data.message || `Request failed with status ${res.status}`, ...data }
+  }
+
+  return { ok: true, ...data }
+}
+
 function StepIcon({ state }) {
   if (state === 'done') {
     return <Check className="h-4 w-4 text-green-600" />
@@ -121,8 +147,8 @@ export default function RalawiseSyncButton({
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ batchSize: 250 }),
         })
-        const data = await res.json()
-        if (!res.ok) throw new Error(data.error || 'Parent batch failed')
+        const data = await safeFetchJson(res)
+        if (!data.ok) throw new Error(data.error || 'Parent batch failed')
 
         if (data.paused || data.job?.status === 'paused' || data.job?.cancelRequested) {
           applyJob(data.job)
@@ -142,8 +168,8 @@ export default function RalawiseSyncButton({
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ batchSize: 500 }),
         })
-        const data = await res.json()
-        if (!res.ok) throw new Error(data.error || 'Variation batch failed')
+        const data = await safeFetchJson(res)
+        if (!data.ok) throw new Error(data.error || 'Variation batch failed')
 
         if (data.paused || data.job?.status === 'paused' || data.job?.cancelRequested) {
           applyJob(data.job)
@@ -162,8 +188,8 @@ export default function RalawiseSyncButton({
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
         })
-        const data = await res.json()
-        if (!res.ok) throw new Error(data.error || 'Finalize failed')
+        const data = await safeFetchJson(res)
+        if (!data.ok) throw new Error(data.error || 'Finalize failed')
 
         applyJob(data.job)
       }
@@ -189,9 +215,9 @@ export default function RalawiseSyncButton({
 
     if (savedJobId) {
       fetch(`/api/ralawise/sync/${savedJobId}/status`)
-        .then((r) => r.json())
+        .then((r) => safeFetchJson(r))
         .then((data) => {
-          if (data && !data.error && data.status !== 'completed' && data.status !== 'failed') {
+          if (data && data.ok && data.status !== 'completed' && data.status !== 'failed') {
             applyJob(data)
             if (isRunning(data.status)) {
               runBatchLoop(data.jobId, data.phase || 'parents')
@@ -202,9 +228,9 @@ export default function RalawiseSyncButton({
               sessionStorage.removeItem(STORAGE_KEY(storeId))
             } catch {}
             fetch(`/api/ralawise/sync?store_id=${storeId}`)
-              .then((r) => r.json())
+              .then((r) => safeFetchJson(r))
               .then((res) => {
-                if (res?.job) {
+                if (res?.ok && res?.job) {
                   applyJob(res.job)
                   try {
                     sessionStorage.setItem(STORAGE_KEY(storeId), JSON.stringify({ jobId: res.job.jobId }))
@@ -221,9 +247,9 @@ export default function RalawiseSyncButton({
     } else {
       // No saved session, query server for any active/paused job
       fetch(`/api/ralawise/sync?store_id=${storeId}`)
-        .then((r) => r.json())
+        .then((r) => safeFetchJson(r))
         .then((res) => {
-          if (res?.job) {
+          if (res?.ok && res?.job) {
             applyJob(res.job)
             try {
               sessionStorage.setItem(STORAGE_KEY(storeId), JSON.stringify({ jobId: res.job.jobId }))
@@ -249,8 +275,8 @@ export default function RalawiseSyncButton({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ store_id: storeId, vendor_id: vendorId }),
       })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error || 'Prepare failed')
+      const data = await safeFetchJson(res)
+      if (!data.ok) throw new Error(data.error || 'Prepare failed')
 
       applyJob(data.job)
       try {
@@ -285,8 +311,10 @@ export default function RalawiseSyncButton({
       const res = await fetch(`/api/ralawise/sync/${job.jobId}/stop`, {
         method: 'POST',
       })
-      const data = await res.json()
-      applyJob(data)
+      const data = await safeFetchJson(res)
+      if (data.ok) {
+        applyJob(data)
+      }
     } catch (err) {
       console.error('Stop error:', err)
     } finally {
@@ -304,8 +332,8 @@ export default function RalawiseSyncButton({
       const res = await fetch(`/api/ralawise/sync/${job.jobId}/resume`, {
         method: 'POST',
       })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error || 'Failed to resume sync')
+      const data = await safeFetchJson(res)
+      if (!data.ok) throw new Error(data.error || 'Failed to resume sync')
 
       applyJob(data)
       try {

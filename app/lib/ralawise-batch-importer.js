@@ -25,6 +25,8 @@ const {
   getSyncJob,
   saveJobPayloads,
   getJobPayloads,
+  getParentBatchSlice,
+  getVariationBatchSlice,
   cleanupJobPayloads,
   serializeJob,
 } = require('./ralawise-sync-jobs')
@@ -224,16 +226,14 @@ async function processParentBatch({ jobId, db, batchSize = DEFAULT_PARENT_BATCH_
     return { paused: true, job: serializeJob(job) }
   }
 
-  const payloads = await getJobPayloads(db, jobId)
-  if (!payloads) throw new Error(`Job ${jobId} payloads not found`)
-
-  const parentRows = Array.isArray(payloads.parentRows)
-    ? payloads.parentRows
-    : (typeof payloads.parentRows === 'string' ? JSON.parse(payloads.parentRows) : Object.values(payloads.parentRows || {}))
-  const total = parentRows.length
   const start = Number(job.parent_cursor) || 0
+  const payloadSlice = await getParentBatchSlice(db, jobId, start, batchSize)
+  if (!payloadSlice) throw new Error(`Job ${jobId} payloads not found`)
 
-  if (start >= total || total === 0) {
+  const batchRows = payloadSlice.rows || []
+  const total = Number(payloadSlice.total) || Number(job.parent_total) || 0
+
+  if (start >= total || total === 0 || batchRows.length === 0) {
     const nextPhase = (Number(job.variation_total) || 0) > 0 ? 'variations' : 'finalize'
     const nextStep = nextPhase === 'variations' ? JOB_STATUS.IMPORTING_VARIATIONS : JOB_STATUS.FINALIZE
     const updated = await updateSyncJob(db, jobId, {
@@ -257,8 +257,7 @@ async function processParentBatch({ jobId, db, batchSize = DEFAULT_PARENT_BATCH_
     }
   }
 
-  const end = Math.min(start + batchSize, total)
-  const batchRows = parentRows.slice(start, end)
+  const end = Math.min(start + batchRows.length, total)
 
   const result = await importProductRows({
     rows: batchRows,
@@ -287,6 +286,7 @@ async function processParentBatch({ jobId, db, batchSize = DEFAULT_PARENT_BATCH_
       : `Importing products... (${newProcessed} / ${total})`,
     parent_processed: newProcessed,
     parent_cursor: end,
+    parent_total: total,
     products_new: (Number(job.products_new) || 0) + (Number(result.newCount) || 0),
     products_updated: (Number(job.products_updated) || 0) + (Number(result.updatedCount) || 0),
     products_errors: (Number(job.products_errors) || 0) + (Number(result.errors?.length) || 0),
@@ -319,16 +319,14 @@ async function processVariationBatch({ jobId, db, batchSize = DEFAULT_VARIATION_
     return { paused: true, job: serializeJob(job) }
   }
 
-  const payloads = await getJobPayloads(db, jobId)
-  if (!payloads) throw new Error(`Job ${jobId} payloads not found`)
-
-  const variationRows = Array.isArray(payloads.variationRows)
-    ? payloads.variationRows
-    : (typeof payloads.variationRows === 'string' ? JSON.parse(payloads.variationRows) : Object.values(payloads.variationRows || {}))
-  const total = variationRows.length
   const start = Number(job.variation_cursor) || 0
+  const payloadSlice = await getVariationBatchSlice(db, jobId, start, batchSize)
+  if (!payloadSlice) throw new Error(`Job ${jobId} payloads not found`)
 
-  if (start >= total || total === 0) {
+  const batchRows = payloadSlice.rows || []
+  const total = Number(payloadSlice.total) || Number(job.variation_total) || 0
+
+  if (start >= total || total === 0 || batchRows.length === 0) {
     const updated = await updateSyncJob(db, jobId, {
       phase: 'finalize',
       step: JOB_STATUS.FINALIZE,
@@ -348,8 +346,7 @@ async function processVariationBatch({ jobId, db, batchSize = DEFAULT_VARIATION_
     }
   }
 
-  const end = Math.min(start + batchSize, total)
-  const batchRows = variationRows.slice(start, end)
+  const end = Math.min(start + batchRows.length, total)
 
   const result = await importVariationRows({
     rows: batchRows,
@@ -375,6 +372,7 @@ async function processVariationBatch({ jobId, db, batchSize = DEFAULT_VARIATION_
       : `Importing variations... (${newProcessed} / ${total})`,
     variation_processed: newProcessed,
     variation_cursor: end,
+    variation_total: total,
     variations_new: (Number(job.variations_new) || 0) + (Number(result.newCount) || 0),
     variations_updated: (Number(job.variations_updated) || 0) + (Number(result.updatedCount) || 0),
     variations_errors: (Number(job.variations_errors) || 0) + (Number(result.errors?.length) || 0),
@@ -467,7 +465,7 @@ async function resumeRalawiseSync({ jobId, db, files = null }) {
 
   // Verify / repopulate payloads if missing
   let payloads = await getJobPayloads(db, jobId)
-  if (!payloads || (!payloads.parentRows?.length && !payloads.variationRows?.length)) {
+  if (!payloads?.hasParents || !payloads?.hasVars) {
     let parentCsvText = files?.parentCsvText
     let variationsCsvText = files?.variationsCsvText
 

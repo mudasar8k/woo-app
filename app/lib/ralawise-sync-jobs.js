@@ -296,17 +296,50 @@ async function saveJobPayloads(db, jobId, { parentRows, variationRows, rawParent
 async function getJobPayloads(db, jobId) {
   await ensureJobsTable(db)
   const result = await db.query(
-    `SELECT * FROM ralawise_sync_job_payloads WHERE job_id = $1`,
+    `SELECT (parent_rows IS NOT NULL) as has_parents, (variation_rows IS NOT NULL) as has_vars,
+            raw_parent_text, raw_var_text
+     FROM ralawise_sync_job_payloads WHERE job_id = $1`,
     [jobId]
   )
   if (result.rows.length === 0) return null
-  const row = result.rows[0]
   return {
-    parentRows: typeof row.parent_rows === 'string' ? JSON.parse(row.parent_rows) : (row.parent_rows || []),
-    variationRows: typeof row.variation_rows === 'string' ? JSON.parse(row.variation_rows) : (row.variation_rows || []),
-    rawParentText: row.raw_parent_text,
-    rawVarText: row.raw_var_text,
+    hasParents: result.rows[0].has_parents,
+    hasVars: result.rows[0].has_vars,
+    rawParentText: result.rows[0].raw_parent_text,
+    rawVarText: result.rows[0].raw_var_text,
   }
+}
+
+async function getParentBatchSlice(db, jobId, start, limit) {
+  await ensureJobsTable(db)
+  const end = Math.max(0, start + limit - 1)
+  const result = await db.query(
+    `SELECT jsonb_path_query_array(parent_rows, ('$[' || $2::text || ' to ' || $3::text || ']')::jsonpath) as slice,
+            jsonb_array_length(parent_rows) as total
+     FROM ralawise_sync_job_payloads WHERE job_id = $1`,
+    [jobId, start, end]
+  )
+  if (result.rows.length === 0) return null
+  const slice = result.rows[0].slice
+  const total = result.rows[0].total || 0
+  const rows = Array.isArray(slice) ? slice : (typeof slice === 'string' ? JSON.parse(slice) : [])
+  return { rows, total }
+}
+
+async function getVariationBatchSlice(db, jobId, start, limit) {
+  await ensureJobsTable(db)
+  const end = Math.max(0, start + limit - 1)
+  const result = await db.query(
+    `SELECT jsonb_path_query_array(variation_rows, ('$[' || $2::text || ' to ' || $3::text || ']')::jsonpath) as slice,
+            jsonb_array_length(variation_rows) as total
+     FROM ralawise_sync_job_payloads WHERE job_id = $1`,
+    [jobId, start, end]
+  )
+  if (result.rows.length === 0) return null
+  const slice = result.rows[0].slice
+  const total = result.rows[0].total || 0
+  const rows = Array.isArray(slice) ? slice : (typeof slice === 'string' ? JSON.parse(slice) : [])
+  return { rows, total }
 }
 
 async function cleanupJobPayloads(db, jobId) {
@@ -391,6 +424,8 @@ module.exports = {
   getActiveSyncJobForStore,
   saveJobPayloads,
   getJobPayloads,
+  getParentBatchSlice,
+  getVariationBatchSlice,
   cleanupJobPayloads,
   serializeJob,
   assertJobNotPaused,

@@ -13,31 +13,34 @@ on:
         type: boolean
 
 jobs:
-  check-and-sync:
+  scheduled-sync:
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     steps:
-      - name: Check & Trigger Scheduled Sync
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run Ralawise Headless Orchestrator
+        env:
+          WOOAPP_URL: ${{ secrets.WOOAPP_URL || 'https://wooapp.southline.co.uk' }}
+          RALAWISE_SYNC_CRON_SECRET: ${{ secrets.RALAWISE_SYNC_CRON_SECRET }}
         run: |
-          WOOAPP_URL="${{ secrets.WOOAPP_URL || 'https://wooapp.southline.co.uk' }}"
-          CRON_SECRET="${{ secrets.RALAWISE_SYNC_CRON_SECRET }}"
-          
-          if [ -z "$CRON_SECRET" ]; then
+          if [ -z "$RALAWISE_SYNC_CRON_SECRET" ]; then
             echo "RALAWISE_SYNC_CRON_SECRET is not configured in GitHub Secrets. Exiting safely."
             exit 0
           fi
           
-          FORCE_VAL="false"
+          FORCE_FLAG=""
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             if [ "${{ inputs.force_run }}" = "true" ] || [ "${{ github.event.inputs.force_run }}" = "true" ]; then
-              FORCE_VAL="true"
+              FORCE_FLAG="--force"
             fi
           fi
           
-          echo "Triggering Ralawise scheduled sync check against $WOOAPP_URL (force=$FORCE_VAL)..."
-          RESPONSE=$(curl -s -X POST "$WOOAPP_URL/api/ralawise/scheduled-sync/check" \
-            -H "Authorization: Bearer $CRON_SECRET" \
-            -H "Content-Type: application/json" \
-            -d "{\"force\": $FORCE_VAL}")
-          
-          echo "Response from WooApp:"
-          echo "$RESPONSE"
+          echo "Executing Ralawise headless orchestrator (force_flag=$FORCE_FLAG)..."
+          node scripts/run-ralawise-headless-sync.js $FORCE_FLAG

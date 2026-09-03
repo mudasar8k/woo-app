@@ -50,3 +50,33 @@ export async function verifyAdminStoreAccess(db, userId, storeId) {
   )
   return accessCheck.rows.length > 0
 }
+
+/**
+ * Authenticate Ralawise sync endpoint calls via NextAuth session or Bearer RALAWISE_SYNC_CRON_SECRET.
+ */
+export async function authenticateSyncJobRequest(request, job, db, auth) {
+  const cronSecret = process.env.RALAWISE_SYNC_CRON_SECRET
+  if (cronSecret) {
+    const authHeader = request.headers.get('authorization') || ''
+    const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : ''
+    const xCronHeader = request.headers.get('x-cron-secret') || ''
+    if (token === cronSecret || xCronHeader === cronSecret) {
+      return { ok: true, isCron: true }
+    }
+  }
+
+  const session = await auth()
+  const roleCheck = requireAdminOrSuperAdminApi(session)
+  if (!roleCheck.ok) {
+    return { ok: false, error: roleCheck.error, status: roleCheck.status }
+  }
+
+  if (job && session?.user?.role === 'admin') {
+    const hasAccess = await verifyAdminStoreAccess(db, session.user.id, job.store_id)
+    if (!hasAccess) {
+      return { ok: false, error: 'Unauthorized access to this store', status: 403 }
+    }
+  }
+
+  return { ok: true, session, isCron: false }
+}

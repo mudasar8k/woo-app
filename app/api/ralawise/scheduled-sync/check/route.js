@@ -2,11 +2,12 @@ import { NextResponse } from 'next/server'
 import db from '../../../../lib/db'
 import {
   isScheduleDue,
-  runHeadlessSync,
   getUkDateString,
   getUkTimeComponents,
 } from '../../../../lib/ralawise-scheduler'
-import { getActiveSyncJobForStore } from '../../../../lib/ralawise-sync-jobs'
+import { prepareRalawiseSync } from '../../../../lib/ralawise-batch-importer'
+import { getActiveSyncJobForStore, getSyncJob } from '../../../../lib/ralawise-sync-jobs'
+import { sendSyncFailureEmail } from '../../../../lib/ralawise-notifications'
 
 export const dynamic = 'force-dynamic'
 
@@ -16,7 +17,6 @@ export const dynamic = 'force-dynamic'
 function authenticateSchedulerRequest(request) {
   const cronSecret = process.env.RALAWISE_SYNC_CRON_SECRET
   if (!cronSecret) {
-    // If no secret configured in environment, disallow execution for safety
     return { ok: false, status: 401, error: 'RALAWISE_SYNC_CRON_SECRET is not configured' }
   }
 
@@ -33,8 +33,8 @@ function authenticateSchedulerRequest(request) {
 
 /**
  * POST /api/ralawise/scheduled-sync/check
- * Periodic scheduler check invoked by GitHub Actions or Vercel Cron.
- * Supports { "force": true } to test scheduled execution prior to the configured time.
+ * Periodic scheduler check & prepare step invoked by GitHub Actions.
+ * Prepares the job and returns immediately for GitHub to orchestrate bounded batches.
  */
 export async function POST(request) {
   const auth = authenticateSchedulerRequest(request)
@@ -59,7 +59,7 @@ export async function POST(request) {
       force = true
     }
   } catch {
-    // ignore json parse error
+    // ignore
   }
 
   if (!force) {
@@ -69,11 +69,11 @@ export async function POST(request) {
         force = true
       }
     } catch {
-      // ignore url error
+      // ignore
     }
   }
 
-  // If global feature flag is off, return early without running (force cannot bypass global flag)
+  // If global feature flag is off, return early without running
   if (!globalEnabled) {
     return NextResponse.json({
       ok: true,
@@ -131,14 +131,47 @@ export async function POST(request) {
         continue
       }
 
-      console.log(`[Scheduler Check] Store ${store.id} (${store.name}) is due for scheduled sync (force=${force}). Launching...`)
+      console.log(`[Scheduler Check] Store ${store.id} (${store.name}) is due. Preparing scheduled sync job (force=${force})...`)
 
-      // Execute headless sync for this store
-      const syncResult = await runHeadlessSync(db, { store, vendorId: 1 })
+      // Execute ONLY prepare phase (fast, bounded serverless operation)
+      const prep = await prepareRalawiseSync(db, {
+        storeId: store.id,
+        vendorId: 1,
+        userId: null,
+        triggerSource: 'scheduled',
+        scheduledFor: ukDate,
+      })
+
+      if (!prep.ok) {
+        console.error(`[Scheduler Check] Prepare failed for Store ${store.id}:`, prep.error)
+        await db.query(
+          `UPDATE stores SET last_scheduled_sync_at = CURRENT_TIMESTAMP, last_scheduled_sync_status = 'failed', last_scheduled_sync_message = $1 WHERE id = $2`,
+          [prep.error || 'Prepare phase failed', store.id]
+        ).catch(() => {})
+
+        if (prep.jobId) {
+          const failedJob = await getSyncJob(db, prep.jobId)
+          await sendSyncFailureEmail(db, { store, job: failedJob, error: new Error(prep.error) })
+        }
+
+        skipped.push({
+          store_id: store.id,
+          store_name: store.name,
+          reason: `Prepare failed: ${prep.error}`,
+          job_id: prep.jobId || null,
+        })
+        continue
+      }
+
       executed.push({
         store_id: store.id,
         store_name: store.name,
-        result: syncResult,
+        job_id: prep.jobId,
+        phase: prep.phase,
+        status: prep.step || prep.phase,
+        parent_total: prep.parentTotal || 0,
+        variation_total: prep.variationTotal || 0,
+        no_changes: Boolean(prep.no_changes),
       })
     }
 

@@ -282,6 +282,27 @@ export default function RalawiseSyncButton({
     }
   }, [applyJob])
 
+  // Polling effect for scheduled background jobs driven by GitHub Actions
+  useEffect(() => {
+    if (!job?.jobId || job.triggerSource !== 'scheduled' || !isRunning(job.status)) {
+      return
+    }
+
+    const interval = setInterval(async () => {
+      try {
+        const res = await fetch(`/api/ralawise/sync/${job.jobId}/status`)
+        const data = await safeFetchJson(res)
+        if (data?.ok) {
+          applyJob(data)
+        }
+      } catch {
+        // ignore polling glitches
+      }
+    }, 3000)
+
+    return () => clearInterval(interval)
+  }, [job?.jobId, job?.triggerSource, job?.status, applyJob])
+
   // Restore active or paused job from session/server on mount
   useEffect(() => {
     let savedJobId = null
@@ -296,20 +317,17 @@ export default function RalawiseSyncButton({
     }
 
     if (savedJobId) {
-      // This tab was orchestrating a specific job — reconnect to it.
+      // This tab was orchestrating a specific manual job -> reconnect to it
       fetch(`/api/ralawise/sync/${savedJobId}/status`)
         .then((r) => safeFetchJson(r))
         .then((data) => {
           if (data && data.ok && data.status !== 'completed' && data.status !== 'failed') {
             applyJob(data)
-            if (isRunning(data.status)) {
-              // Same job, same tab — safe to auto-resume orchestration.
+            if (isRunning(data.status) && data.triggerSource !== 'scheduled') {
+              // Manual job on same tab -> resume browser loop
               runBatchLoop(data.jobId, data.phase || 'parents')
             }
           } else {
-            // Stored job is terminal or unreachable — clear stale storage and
-            // show idle UI. Do NOT fall through to server discovery: that could
-            // find an older stale job and restart it unintentionally.
             try {
               sessionStorage.removeItem(STORAGE_KEY(storeId))
             } catch {}
@@ -317,19 +335,12 @@ export default function RalawiseSyncButton({
         })
         .catch(() => {})
     } else {
-      // No session storage — query server to display any active/paused job.
-      // Do NOT auto-call runBatchLoop here: without session-storage confirmation
-      // that this tab was already orchestrating the job, starting the batch loop
-      // could re-run a stale crashed job from a prior session.
-      // The user must explicitly click Resume to restart orchestration.
+      // No session storage -> query server to display any active/paused job (read-only)
       fetch(`/api/ralawise/sync?store_id=${storeId}`)
         .then((r) => safeFetchJson(r))
         .then((res) => {
           if (res?.ok && res?.job) {
             applyJob(res.job)
-            try {
-              sessionStorage.setItem(STORAGE_KEY(storeId), JSON.stringify({ jobId: res.job.jobId }))
-            } catch {}
           }
         })
         .catch(() => {})
@@ -428,69 +439,66 @@ export default function RalawiseSyncButton({
 
   const handleAbandon = async () => {
     if (!job?.jobId) return
-    const confirmed = window.confirm(
-      'Discard this paused sync? Already imported data will remain. This only closes the sync job.'
-    )
-    if (!confirmed) return
+    if (
+      !window.confirm(
+        'Are you sure you want to discard this sync? Any products and variations already processed will remain saved in WooApp, and you will be able to start a fresh sync.'
+      )
+    ) {
+      return
+    }
+
     setActionBusy(true)
+    abortRef.current = true
     try {
       const res = await fetch(`/api/ralawise/sync/${job.jobId}/abandon`, {
         method: 'POST',
       })
       const data = await safeFetchJson(res)
-      if (data.ok) {
-        applyJob(data.job)
-        try { sessionStorage.removeItem(STORAGE_KEY(storeId)) } catch {}
-      } else {
-        setError(data.error || 'Failed to discard sync')
+      if (!data.ok) throw new Error(data.error || 'Failed to discard sync')
+
+      applyJob(data.job)
+      try {
+        sessionStorage.removeItem(STORAGE_KEY(storeId))
+      } catch {
+        // ignore
       }
     } catch (err) {
       setError(err.message || 'Failed to discard sync')
     } finally {
       setActionBusy(false)
+      setLoading(false)
     }
   }
 
   const status = job?.status || 'idle'
-  const currentStepIdx = stepIndex(status)
-  const result = job?.result
-  const showProgress = status !== 'idle' && status !== 'abandoned'
-
-  const canStop = isRunning(status) && !actionBusy
-  const canResume = status === 'paused' && !actionBusy && !loading
-  const canDiscard = status === 'paused' && !actionBusy && !loading
+  const currentStepIdx = stepIndex(job?.step || status)
+  const isBusy = loading || isRunning(status)
+  const isPaused = status === 'paused'
+  const canStop = isRunning(status) && job?.jobId
+  const canResume = isPaused && job?.jobId
+  const canDiscard = isPaused && job?.jobId
+  const showProgress = status !== 'idle' && (isBusy || isPaused || status === 'abandoned')
 
   return (
-    <div className={compact ? 'space-y-2' : 'space-y-3'}>
-      {vendors.length > 1 && (
-        <label className="block text-sm text-gray-600">
-          Vendor
-          <select
-            className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
-            value={vendorId}
-            disabled={loading || status === 'paused'}
-            onChange={(e) => setVendorId(e.target.value)}
-          >
-            <option value="">Select vendor</option>
-            {vendors.map((v) => (
-              <option key={v.id} value={v.id}>
-                {v.name}
-              </option>
-            ))}
-          </select>
-        </label>
-      )}
-
-      <div className="flex gap-2">
+    <div className="space-y-3">
+      <div className="flex items-center gap-2">
         <Button
           type="button"
-          variant="outline"
-          className="flex-1"
-          disabled={loading || status === 'paused' || !vendorId}
           onClick={handleSync}
+          disabled={isBusy || actionBusy || isPaused}
+          className="relative"
         >
-          <RefreshCw className={`h-4 w-4 mr-2 ${loading ? 'animate-spin' : ''}`} />
-          {loading ? 'Syncing from Ralawise...' : 'Sync from Ralawise'}
+          {isBusy ? (
+            <>
+              <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+              Syncing from Ralawise...
+            </>
+          ) : (
+            <>
+              <RefreshCw className="h-4 w-4 mr-2" />
+              Sync from Ralawise
+            </>
+          )}
         </Button>
 
         {canStop && (

@@ -265,7 +265,18 @@ async function prepareRalawiseSync(arg1, arg2) {
 /**
  * Phase 2: Process a single batch of parent products
  */
-async function processParentBatch(db, jobId, { batchSize = DEFAULT_PARENT_BATCH_SIZE } = {}) {
+async function processParentBatch(arg1, arg2, arg3) {
+  let db, jobId, batchSize
+  if (arg1 && typeof arg1.query === 'function') {
+    db = arg1
+    jobId = arg2
+    batchSize = arg3?.batchSize || DEFAULT_PARENT_BATCH_SIZE
+  } else {
+    db = arg1?.db
+    jobId = arg1?.jobId
+    batchSize = arg1?.batchSize || DEFAULT_PARENT_BATCH_SIZE
+  }
+
   const job = await getSyncJob(db, jobId)
   if (!job) return { ok: false, error: 'Job not found' }
 
@@ -381,7 +392,18 @@ async function processParentBatch(db, jobId, { batchSize = DEFAULT_PARENT_BATCH_
 /**
  * Phase 3: Process a single batch of variations
  */
-async function processVariationBatch(db, jobId, { batchSize = DEFAULT_VARIATION_BATCH_SIZE } = {}) {
+async function processVariationBatch(arg1, arg2, arg3) {
+  let db, jobId, batchSize
+  if (arg1 && typeof arg1.query === 'function') {
+    db = arg1
+    jobId = arg2
+    batchSize = arg3?.batchSize || DEFAULT_VARIATION_BATCH_SIZE
+  } else {
+    db = arg1?.db
+    jobId = arg1?.jobId
+    batchSize = arg1?.batchSize || DEFAULT_VARIATION_BATCH_SIZE
+  }
+
   const job = await getSyncJob(db, jobId)
   if (!job) return { ok: false, error: 'Job not found' }
 
@@ -486,7 +508,16 @@ async function processVariationBatch(db, jobId, { batchSize = DEFAULT_VARIATION_
 /**
  * Phase 4: Finalize
  */
-async function finalizeRalawiseSync(db, jobId) {
+async function finalizeRalawiseSync(arg1, arg2) {
+  let db, jobId
+  if (arg1 && typeof arg1.query === 'function') {
+    db = arg1
+    jobId = arg2
+  } else {
+    db = arg1?.db
+    jobId = arg1?.jobId
+  }
+
   const job = await getSyncJob(db, jobId)
   if (!job) return { ok: false, error: 'Job not found' }
 
@@ -529,6 +560,19 @@ async function finalizeRalawiseSync(db, jobId) {
       completed_at: new Date(),
     })
 
+    // Update store observability status
+    await db.query(
+      `UPDATE stores SET last_scheduled_sync_at = CURRENT_TIMESTAMP, last_scheduled_sync_status = 'completed', last_scheduled_sync_message = 'Sync completed successfully' WHERE id = $1`,
+      [job.store_id]
+    ).catch(() => {})
+
+    // Send Completion Email Notification (Idempotent)
+    const storeRes = await db.query('SELECT * FROM stores WHERE id = $1', [job.store_id])
+    if (storeRes.rows.length > 0) {
+      const { sendSyncCompletionEmail } = require('./ralawise-notifications')
+      await sendSyncCompletionEmail(db, { store: storeRes.rows[0], job: updated })
+    }
+
     return {
       ok: true,
       status: JOB_STATUS.COMPLETED,
@@ -548,7 +592,16 @@ async function finalizeRalawiseSync(db, jobId) {
 /**
  * Stop / Pause a running sync job
  */
-async function stopRalawiseSync(db, jobId) {
+async function stopRalawiseSync(arg1, arg2) {
+  let db, jobId
+  if (arg1 && typeof arg1.query === 'function') {
+    db = arg1
+    jobId = arg2
+  } else {
+    db = arg1?.db
+    jobId = arg1?.jobId
+  }
+
   const job = await getSyncJob(db, jobId)
   if (!job) return { ok: false, error: 'Job not found' }
 
@@ -571,7 +624,16 @@ async function stopRalawiseSync(db, jobId) {
 /**
  * Resume a paused sync job
  */
-async function resumeRalawiseSync(db, jobId) {
+async function resumeRalawiseSync(arg1, arg2) {
+  let db, jobId
+  if (arg1 && typeof arg1.query === 'function') {
+    db = arg1
+    jobId = arg2
+  } else {
+    db = arg1?.db
+    jobId = arg1?.jobId
+  }
+
   const job = await getSyncJob(db, jobId)
   if (!job) return { ok: false, error: 'Job not found' }
 

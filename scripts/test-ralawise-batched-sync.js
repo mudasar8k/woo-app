@@ -1,6 +1,6 @@
 /**
  * Automated test suite for Ralawise batched & scheduled sync engine,
- * scheduling, UK DST handling, duplicate run protection, force mode, system actor attribution, and email notifications.
+ * scheduling, UK DST handling, duplicate run protection, force mode, system actor attribution, GitHub orchestrator, and email notifications.
  */
 
 require('dotenv').config({ path: '.env.local' })
@@ -34,7 +34,6 @@ const {
   getUkTimeComponents,
   parseTimeSetting,
   isScheduleDue,
-  runHeadlessSync,
 } = require('../app/lib/ralawise-scheduler')
 const {
   sendResendEmail,
@@ -44,6 +43,9 @@ const {
   parseRecipients,
   formatUkDateTime,
 } = require('../app/lib/ralawise-notifications')
+const {
+  authenticateSyncJobRequest,
+} = require('../app/lib/role-guards')
 
 let passed = 0
 let failed = 0
@@ -418,6 +420,47 @@ async function runTests() {
       scheduledFor: ukDate,
     })
     assert(headlessPrep.ok === true, 'prepareRalawiseSync with userId=null succeeds without not-null violation')
+
+    // 17. GitHub Orchestrator & Serverless Decoupling Tests
+    console.log('\n--- Test 17: GitHub Orchestrator & Serverless Decoupling ---')
+    process.env.RALAWISE_SYNC_CRON_SECRET = 'test_cron_secret_123'
+
+    // A. Bearer Cron Secret Auth Check
+    const mockHeaders = new Map([['authorization', 'Bearer test_cron_secret_123']])
+    const mockRequestWithBearer = {
+      headers: {
+        get: (k) => mockHeaders.get(k.toLowerCase()) || null,
+      },
+    }
+
+    const authRes = await authenticateSyncJobRequest(mockRequestWithBearer, headlessPrep.job, db, () => null)
+    assert(authRes.ok === true && authRes.isCron === true, 'authenticateSyncJobRequest accepts valid Bearer CRON_SECRET')
+
+    // B. Invalid Secret Auth Rejection
+    const mockHeadersInvalid = new Map([['authorization', 'Bearer wrong_secret']])
+    const mockRequestInvalid = {
+      headers: {
+        get: (k) => mockHeadersInvalid.get(k.toLowerCase()) || null,
+      },
+    }
+
+    const authInvalidRes = await authenticateSyncJobRequest(mockRequestInvalid, headlessPrep.job, db, () => null)
+    assert(authInvalidRes.ok === false, 'authenticateSyncJobRequest rejects invalid bearer token')
+
+    // C. Verify Bounded Batch Calls Step Progressively
+    const orchestratorPb = await processParentBatch(db, headlessPrep.jobId, { batchSize: 3 })
+    assert(orchestratorPb.ok === true, 'Orchestrator parent batch executes bounded batch')
+    assert(Number(orchestratorPb.job.parentProcessed) === 3, 'Parent processed advanced to 3')
+
+    const orchestratorPb2 = await processParentBatch(db, headlessPrep.jobId, { batchSize: 3 })
+    assert(orchestratorPb2.ok === true, 'Orchestrator parent batch completes remaining parents')
+    assert(Number(orchestratorPb2.job.parentProcessed) === 5, 'Parent processed reached 5')
+    assert(orchestratorPb2.phase === 'variations', 'Orchestrator transitioned to variations phase')
+
+    // D. Finalize call completes job and cleans payloads
+    const orchFin = await finalizeRalawiseSync(db, headlessPrep.jobId)
+    assert(orchFin.ok === true, 'Finalize succeeds')
+    assert(orchFin.status === JOB_STATUS.COMPLETED, 'Job status is completed')
 
     // Clean up test fixtures
     await db.query('DELETE FROM ralawise_sync_jobs WHERE id IN ($1, $2, $3, $4)', [jobId, emailTestJob.id, failJob.id, headlessPrep.jobId])

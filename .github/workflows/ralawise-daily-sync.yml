@@ -9,7 +9,8 @@ on:
       force_run:
         description: 'Force execution even if not due'
         required: false
-        default: 'false'
+        default: false
+        type: boolean
 
 jobs:
   check-and-sync:
@@ -25,10 +26,18 @@ jobs:
             exit 0
           fi
           
-          echo "Triggering Ralawise scheduled sync check against $WOOAPP_URL..."
+          FORCE_VAL="false"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            if [ "${{ inputs.force_run }}" = "true" ] || [ "${{ github.event.inputs.force_run }}" = "true" ]; then
+              FORCE_VAL="true"
+            fi
+          fi
+          
+          echo "Triggering Ralawise scheduled sync check against $WOOAPP_URL (force=$FORCE_VAL)..."
           RESPONSE=$(curl -s -X POST "$WOOAPP_URL/api/ralawise/scheduled-sync/check" \
             -H "Authorization: Bearer $CRON_SECRET" \
-            -H "Content-Type: application/json")
+            -H "Content-Type: application/json" \
+            -d "{\"force\": $FORCE_VAL}")
           
           echo "Response from WooApp:"
           echo "$RESPONSE"

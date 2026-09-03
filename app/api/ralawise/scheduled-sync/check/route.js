@@ -34,6 +34,7 @@ function authenticateSchedulerRequest(request) {
 /**
  * POST /api/ralawise/scheduled-sync/check
  * Periodic scheduler check invoked by GitHub Actions or Vercel Cron.
+ * Supports { "force": true } to test scheduled execution prior to the configured time.
  */
 export async function POST(request) {
   const auth = authenticateSchedulerRequest(request)
@@ -45,12 +46,40 @@ export async function POST(request) {
   const ukDate = getUkDateString(new Date())
   const ukTime = getUkTimeComponents(new Date())
 
-  // If global feature flag is off, return early without running
+  // Parse force mode from body or query params
+  let force = false
+  try {
+    const body = await request.json().catch(() => ({}))
+    if (
+      body?.force === true ||
+      body?.force === 'true' ||
+      body?.force_run === true ||
+      body?.force_run === 'true'
+    ) {
+      force = true
+    }
+  } catch {
+    // ignore json parse error
+  }
+
+  if (!force) {
+    try {
+      const url = new URL(request.url)
+      if (url.searchParams.get('force') === 'true' || url.searchParams.get('force_run') === 'true') {
+        force = true
+      }
+    } catch {
+      // ignore url error
+    }
+  }
+
+  // If global feature flag is off, return early without running (force cannot bypass global flag)
   if (!globalEnabled) {
     return NextResponse.json({
       ok: true,
       message: 'Scheduler checked: Global feature flag RALAWISE_SYNC_SCHEDULE_ENABLED is disabled.',
       global_enabled: false,
+      force,
       uk_date: ukDate,
       uk_time: `${String(ukTime.hour).padStart(2, '0')}:${String(ukTime.minute).padStart(2, '0')}`,
       executed: [],
@@ -90,6 +119,7 @@ export async function POST(request) {
         now: new Date(),
         lastScheduledJobToday,
         activeJob,
+        force,
       })
 
       if (!dueCheck.isDue) {
@@ -101,7 +131,7 @@ export async function POST(request) {
         continue
       }
 
-      console.log(`[Scheduler Check] Store ${store.id} (${store.name}) is due for scheduled sync. Launching...`)
+      console.log(`[Scheduler Check] Store ${store.id} (${store.name}) is due for scheduled sync (force=${force}). Launching...`)
 
       // Execute headless sync for this store
       const syncResult = await runHeadlessSync(db, { store, vendorId: 1 })
@@ -117,6 +147,7 @@ export async function POST(request) {
       uk_date: ukDate,
       uk_time: `${String(ukTime.hour).padStart(2, '0')}:${String(ukTime.minute).padStart(2, '0')}`,
       global_enabled: true,
+      force,
       stores_checked: storesRes.rows.length,
       executed,
       skipped,

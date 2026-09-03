@@ -1,6 +1,6 @@
 /**
  * Automated test suite for Ralawise batched & scheduled sync engine,
- * scheduling, UK DST handling, duplicate run protection, and email notifications.
+ * scheduling, UK DST handling, duplicate run protection, force mode, and email notifications.
  */
 
 require('dotenv').config({ path: '.env.local' })
@@ -303,6 +303,71 @@ async function runTests() {
     // C. Verify zero sync jobs created and zero catalog mutations occurred
     const jobCheck = await getSyncJob(db, 999999)
     assert(jobCheck === null, 'Test email creates zero sync jobs')
+
+    // 15. Force Execution Mode Tests
+    console.log('\n--- Test 15: Force Execution Mode & Guards ---')
+    process.env.RALAWISE_SYNC_SCHEDULE_ENABLED = 'true'
+    const earlyMorningDate = new Date('2026-09-03T06:19:00Z') // 06:19 UK (not due for 14:00)
+
+    // A. Normal check before scheduled time -> skipped
+    const normalEarly = isScheduleDue({
+      store: { id: 4, ralawise_auto_sync_enabled: true, ralawise_sync_time: '14:00' },
+      now: earlyMorningDate,
+      force: false,
+    })
+    assert(normalEarly.isDue === false, 'normal check before scheduled time -> skipped')
+
+    // B. force=false before scheduled time -> skipped
+    const forceFalseEarly = isScheduleDue({
+      store: { id: 4, ralawise_auto_sync_enabled: true, ralawise_sync_time: '14:00' },
+      now: earlyMorningDate,
+      force: false,
+    })
+    assert(forceFalseEarly.isDue === false, 'force=false before scheduled time -> skipped')
+
+    // C. force=true before scheduled time -> allowed
+    const forceTrueEarly = isScheduleDue({
+      store: { id: 4, ralawise_auto_sync_enabled: true, ralawise_sync_time: '14:00' },
+      now: earlyMorningDate,
+      force: true,
+    })
+    assert(forceTrueEarly.isDue === true, 'force=true before scheduled time -> allowed')
+
+    // D. force=true with global flag false -> skipped
+    process.env.RALAWISE_SYNC_SCHEDULE_ENABLED = 'false'
+    const forceGlobalFalse = isScheduleDue({
+      store: { id: 4, ralawise_auto_sync_enabled: true, ralawise_sync_time: '14:00' },
+      now: earlyMorningDate,
+      force: true,
+    })
+    assert(forceGlobalFalse.isDue === false, 'force=true with global flag false -> skipped')
+    process.env.RALAWISE_SYNC_SCHEDULE_ENABLED = 'true'
+
+    // E. force=true with store disabled -> skipped
+    const forceStoreDisabled = isScheduleDue({
+      store: { id: 4, ralawise_auto_sync_enabled: false, ralawise_sync_time: '14:00' },
+      now: earlyMorningDate,
+      force: true,
+    })
+    assert(forceStoreDisabled.isDue === false, 'force=true with store disabled -> skipped')
+
+    // F. force=true with active job -> skipped
+    const forceActiveJob = isScheduleDue({
+      store: { id: 4, ralawise_auto_sync_enabled: true, ralawise_sync_time: '14:00' },
+      now: earlyMorningDate,
+      activeJob: { id: 101, status: 'importing_products' },
+      force: true,
+    })
+    assert(forceActiveJob.isDue === false, 'force=true with active job -> skipped')
+
+    // G. force=true with paused job -> skipped
+    const forcePausedJob = isScheduleDue({
+      store: { id: 4, ralawise_auto_sync_enabled: true, ralawise_sync_time: '14:00' },
+      now: earlyMorningDate,
+      activeJob: { id: 102, status: 'paused' },
+      force: true,
+    })
+    assert(forcePausedJob.isDue === false, 'force=true with paused job -> skipped')
 
     // Clean up test fixtures
     await db.query('DELETE FROM ralawise_sync_jobs WHERE id IN ($1, $2, $3)', [jobId, emailTestJob.id, failJob.id])

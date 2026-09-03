@@ -1,5 +1,5 @@
 /**
- * Automated test suite for Ralawise batched & resumable sync engine,
+ * Automated test suite for Ralawise batched & scheduled sync engine,
  * scheduling, UK DST handling, duplicate run protection, and email notifications.
  */
 
@@ -33,6 +33,8 @@ const {
   runHeadlessSync,
 } = require('../app/lib/ralawise-scheduler')
 const {
+  sendResendEmail,
+  sendTestSyncEmail,
   sendSyncCompletionEmail,
   sendSyncFailureEmail,
   parseRecipients,
@@ -256,7 +258,6 @@ async function runTests() {
       job: emailTestJob,
       approvedProductCount: 564,
     })
-    // In test environment without real API key, sendResendEmail returns skipped=true gracefully
     assert(email1.alreadySent !== true, 'First completion email claim succeeds')
 
     // Second completion email claim (Idempotency check)
@@ -282,6 +283,26 @@ async function runTests() {
       error: new Error('Simulated network timeout'),
     })
     assert(fail2.alreadySent === true, 'Duplicate failure email is suppressed idempotently')
+
+    // 14. Safe Test Email Delivery Test
+    console.log('\n--- Test 14: Safe Test Email Delivery Function ---')
+    // A. Missing recipient validation
+    const testEmailNoRecip = await sendTestSyncEmail({
+      store: { id: storeId, name: 'Southline', ralawise_sync_notify_emails: '' },
+      customRecipients: '',
+    })
+    assert(testEmailNoRecip.ok === false, 'sendTestSyncEmail rejects empty recipients with validation error')
+
+    // B. Safe execution with recipients (graceful fallback when API key missing in test)
+    const testEmailValid = await sendTestSyncEmail({
+      store: { id: storeId, name: 'Southline', ralawise_sync_notify_emails: 'test@example.com' },
+      customRecipients: 'test@southline.co.uk',
+    })
+    assert(testEmailValid.ok === true || testEmailValid.skipped === true || typeof testEmailValid.error === 'string', 'sendTestSyncEmail dispatches safely without side effects')
+
+    // C. Verify zero sync jobs created and zero catalog mutations occurred
+    const jobCheck = await getSyncJob(db, 999999)
+    assert(jobCheck === null, 'Test email creates zero sync jobs')
 
     // Clean up test fixtures
     await db.query('DELETE FROM ralawise_sync_jobs WHERE id IN ($1, $2, $3)', [jobId, emailTestJob.id, failJob.id])

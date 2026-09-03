@@ -48,17 +48,18 @@ function parseRecipients(input, fallback = '') {
  */
 async function sendResendEmail({ to, subject, html, text }) {
   const apiKey = process.env.RESEND_API_KEY
-  const fromEmail = process.env.RESEND_FROM_EMAIL || 'WooApp Sync <onboarding@resend.dev>'
+  const fromEmail = process.env.RESEND_FROM_EMAIL || 'WooApp Sync <sync@southline.co.uk>'
 
   if (!apiKey) {
     console.warn('[Notifications] RESEND_API_KEY not configured. Email not sent:', {
       to,
       subject,
     })
-    return { ok: false, error: 'RESEND_API_KEY is not configured', skipped: true }
+    return { ok: false, error: 'RESEND_API_KEY is not configured on the server', skipped: true }
   }
 
-  if (!to || to.length === 0) {
+  const recipients = Array.isArray(to) ? to : (to ? [to] : [])
+  if (recipients.length === 0) {
     console.warn('[Notifications] No recipients provided. Email not sent.')
     return { ok: false, error: 'No recipient emails specified', skipped: true }
   }
@@ -72,7 +73,7 @@ async function sendResendEmail({ to, subject, html, text }) {
       },
       body: JSON.stringify({
         from: fromEmail,
-        to: Array.isArray(to) ? to : [to],
+        to: recipients,
         subject,
         html,
         text,
@@ -88,7 +89,7 @@ async function sendResendEmail({ to, subject, html, text }) {
 
     console.log('[Notifications] Email sent successfully via Resend:', {
       id: data?.id,
-      to,
+      to: recipients,
       subject,
     })
     return { ok: true, id: data?.id }
@@ -96,6 +97,76 @@ async function sendResendEmail({ to, subject, html, text }) {
     console.error('[Notifications] Email fetch failed:', err.message)
     return { ok: false, error: err.message }
   }
+}
+
+/**
+ * Send a test email to verify Resend configuration without running any sync.
+ */
+async function sendTestSyncEmail({ store, customRecipients = null }) {
+  const recipients = parseRecipients(
+    customRecipients || store.ralawise_sync_notify_emails,
+    process.env.RALAWISE_SYNC_NOTIFY_EMAILS
+  )
+
+  if (recipients.length === 0) {
+    return { ok: false, error: 'No recipient email configured. Please enter an email address.' }
+  }
+
+  const storeName = store?.name || 'Southline'
+  const timeUk = formatUkDateTime(new Date())
+  const subject = `[WooApp] Ralawise Sync Email Test`
+
+  const html = `
+    <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; border: 1px solid #e5e7eb; border-radius: 8px; padding: 24px;">
+      <h2 style="color: #4f46e5; margin-top: 0;">WooApp Ralawise Sync Email Test</h2>
+      <p>WooApp scheduled sync email notifications are configured correctly.</p>
+      
+      <table style="width: 100%; border-collapse: collapse; margin: 16px 0;">
+        <tr style="border-bottom: 1px solid #f3f4f6;">
+          <td style="padding: 8px 0; color: #6b7280;"><strong>Store:</strong></td>
+          <td style="padding: 8px 0; text-align: right;">${storeName}</td>
+        </tr>
+        <tr style="border-bottom: 1px solid #f3f4f6;">
+          <td style="padding: 8px 0; color: #6b7280;"><strong>Timezone:</strong></td>
+          <td style="padding: 8px 0; text-align: right;">Europe/London (UK Time)</td>
+        </tr>
+        <tr style="border-bottom: 1px solid #f3f4f6;">
+          <td style="padding: 8px 0; color: #6b7280;"><strong>Sent At (UK):</strong></td>
+          <td style="padding: 8px 0; text-align: right;">${timeUk}</td>
+        </tr>
+      </table>
+
+      <div style="background-color: #eef2ff; border: 1px solid #c7d2fe; border-radius: 6px; padding: 12px; margin-bottom: 20px;">
+        <p style="margin: 0; color: #3730a3; font-size: 14px;">
+          <strong>Information:</strong> This is a test email only. No Ralawise sync was started, and catalog data was not modified.
+        </p>
+      </div>
+
+      <p style="font-size: 12px; color: #9ca3af; margin-bottom: 0;">
+        This test notification was triggered from the WooApp Store Settings dashboard for ${storeName}.
+      </p>
+    </div>
+  `
+
+  const text = `
+WooApp Ralawise Sync Email Test
+
+WooApp scheduled sync email notifications are configured correctly.
+
+Store: ${storeName}
+Timezone: Europe/London
+Sent At: ${timeUk}
+
+This is only a test email.
+No Ralawise sync was started.
+  `.trim()
+
+  return sendResendEmail({
+    to: recipients,
+    subject,
+    html,
+    text,
+  })
 }
 
 /**
@@ -356,6 +427,7 @@ Action: Log in to WooApp and click Resume to continue from the saved cursor.
 
 module.exports = {
   sendResendEmail,
+  sendTestSyncEmail,
   sendSyncCompletionEmail,
   sendSyncFailureEmail,
   formatUkDateTime,

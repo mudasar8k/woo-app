@@ -2,17 +2,20 @@
 
 import { useState, useEffect } from 'react'
 import { Button } from '@/app/components/ui/button'
-import { Check, Clock, Globe, Mail, AlertCircle, Loader2 } from 'lucide-react'
+import { Check, Clock, Globe, Mail, AlertCircle, Loader2, Send } from 'lucide-react'
 
 export default function AutomaticSyncSettings({ storeId, storeName }) {
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
+  const [testingEmail, setTestingEmail] = useState(false)
   const [enabled, setEnabled] = useState(false)
   const [syncTime, setSyncTime] = useState('14:00')
   const [notifyEmails, setNotifyEmails] = useState('')
   const [statusData, setStatusData] = useState(null)
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
+  const [testEmailSuccess, setTestEmailSuccess] = useState('')
+  const [testEmailError, setTestEmailError] = useState('')
 
   useEffect(() => {
     fetch(`/api/stores/${storeId}/sync-settings`)
@@ -66,6 +69,36 @@ export default function AutomaticSyncSettings({ storeId, storeName }) {
       setError(err.message || 'An error occurred while saving')
     } finally {
       setSaving(false)
+    }
+  }
+
+  const handleSendTestEmail = async () => {
+    if (!notifyEmails || notifyEmails.trim() === '') {
+      setTestEmailError('Please enter at least one recipient email address before testing.')
+      return
+    }
+
+    setTestingEmail(true)
+    setTestEmailSuccess('')
+    setTestEmailError('')
+
+    try {
+      const res = await fetch(`/api/stores/${storeId}/sync-settings/test-email`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ recipients: notifyEmails }),
+      })
+
+      const data = await res.json()
+      if (res.ok && data.ok) {
+        setTestEmailSuccess(data.message || 'Test email sent successfully.')
+      } else {
+        setTestEmailError(data.error || 'Failed to send test email')
+      }
+    } catch (err) {
+      setTestEmailError(err.message || 'An error occurred while sending test email')
+    } finally {
+      setTestingEmail(false)
     }
   }
 
@@ -180,21 +213,61 @@ export default function AutomaticSyncSettings({ storeId, storeName }) {
         </div>
 
         {/* Notification Emails */}
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1 flex items-center gap-1.5">
+        <div className="space-y-2">
+          <label className="block text-sm font-medium text-gray-700 flex items-center gap-1.5">
             <Mail className="h-4 w-4 text-gray-500" />
             Notification Recipient Emails
           </label>
-          <input
-            type="text"
-            value={notifyEmails}
-            onChange={(e) => setNotifyEmails(e.target.value)}
-            placeholder="e.g. admin@southline.co.uk, alerts@southline.co.uk"
-            className="block w-full rounded-md border border-gray-300 px-3 py-2 text-sm shadow-sm focus:border-indigo-500 focus:ring-indigo-500"
-          />
-          <p className="text-xs text-gray-500 mt-1">
+          <div className="flex flex-col sm:flex-row gap-2">
+            <input
+              type="text"
+              value={notifyEmails}
+              onChange={(e) => {
+                setNotifyEmails(e.target.value)
+                setTestEmailSuccess('')
+                setTestEmailError('')
+              }}
+              placeholder="e.g. admin@southline.co.uk, alerts@southline.co.uk"
+              className="block flex-1 rounded-md border border-gray-300 px-3 py-2 text-sm shadow-sm focus:border-indigo-500 focus:ring-indigo-500"
+            />
+            <Button
+              type="button"
+              variant="outline"
+              disabled={testingEmail || !notifyEmails.trim()}
+              onClick={handleSendTestEmail}
+              className="shrink-0 border-indigo-200 text-indigo-700 hover:bg-indigo-50"
+            >
+              {testingEmail ? (
+                <>
+                  <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
+                  Sending...
+                </>
+              ) : (
+                <>
+                  <Send className="h-4 w-4 mr-1.5" />
+                  Send Test Email
+                </>
+              )}
+            </Button>
+          </div>
+          <p className="text-xs text-gray-500">
             Comma-separated email addresses to receive sync completion summaries and pause/failure alerts.
           </p>
+
+          {/* Test Email Result Feedback */}
+          {testEmailSuccess && (
+            <div className="p-2.5 bg-green-50 border border-green-200 text-green-800 rounded-md text-xs flex items-center gap-2">
+              <Check className="h-4 w-4 shrink-0 text-green-600" />
+              <span>{testEmailSuccess}</span>
+            </div>
+          )}
+
+          {testEmailError && (
+            <div className="p-2.5 bg-red-50 border border-red-200 text-red-800 rounded-md text-xs flex items-center gap-2">
+              <AlertCircle className="h-4 w-4 shrink-0 text-red-600" />
+              <span>{testEmailError}</span>
+            </div>
+          )}
         </div>
 
         {/* Status Observability Grid */}

@@ -187,7 +187,7 @@ async function prepareRalawiseSync(arg1, arg2) {
       }
     }
 
-    // Create tracking csv_uploads records
+    // Create tracking csv_uploads records (supports system/scheduled actor with userId=null)
     const productUploadId = await createCsvUploadRecord({
       db,
       storeId,
@@ -196,6 +196,7 @@ async function prepareRalawiseSync(arg1, arg2) {
       fileType: 'products',
       fileName: 'wordpressdatafullparent.csv',
       rowCount: productRowsToImport.length,
+      triggerSource,
     })
 
     const variationUploadId = await createCsvUploadRecord({
@@ -206,6 +207,7 @@ async function prepareRalawiseSync(arg1, arg2) {
       fileType: 'variations',
       fileName: 'wordpressdatafullvariations.csv',
       rowCount: variationRowsToImport.length,
+      triggerSource,
     })
 
     // Save parsed payload in DB for safe stateless batch processing

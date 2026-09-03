@@ -24,21 +24,27 @@ async function reportProgress(onProgress, payload) {
 
 /**
  * Create a csv_uploads row and return its id.
+ * Supports both manual admin uploads and scheduled/system imports.
  */
 async function createCsvUploadRecord({
   db,
   storeId,
   vendorId,
-  userId,
+  userId = null,
   fileType,
   fileName,
   rowCount,
+  triggerSource = 'manual',
 }) {
+  await db.query(`ALTER TABLE csv_uploads ALTER COLUMN uploaded_by DROP NOT NULL`).catch(() => {})
+  await db.query(`ALTER TABLE csv_uploads ADD COLUMN IF NOT EXISTS trigger_source VARCHAR(20) DEFAULT 'manual'`).catch(() => {})
+
+  const source = triggerSource || (userId ? 'manual' : 'scheduled')
   const result = await db.query(
-    `INSERT INTO csv_uploads (store_id, vendor_id, uploaded_by, file_type, file_name, row_count, status)
-     VALUES ($1, $2, $3, $4, $5, $6, 'processing')
+    `INSERT INTO csv_uploads (store_id, vendor_id, uploaded_by, file_type, file_name, row_count, status, trigger_source)
+     VALUES ($1, $2, $3, $4, $5, $6, 'processing', $7)
      RETURNING id`,
-    [storeId, vendorId, userId, fileType, fileName, rowCount]
+    [storeId, vendorId, userId || null, fileType, fileName, rowCount, source]
   )
   return result.rows[0].id
 }
@@ -83,199 +89,148 @@ function lastImportPaths(vendorId) {
   }
 }
 
-function rowHash(row) {
-  const keys = Object.keys(row || {}).sort()
-  const normalized = {}
-  for (const key of keys) {
-    const value = row[key]
-    normalized[key] = value == null ? '' : String(value).trim()
+function computeFileHash(text) {
+  return crypto.createHash('md5').update(text, 'utf8').digest('hex')
+}
+
+function retainLastImportFiles({ vendorId, parentCsvText, variationsCsvText }) {
+  try {
+    const { dir, parentCsvPath, variationsCsvPath } = lastImportPaths(vendorId)
+    fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(parentCsvPath, parentCsvText, 'utf8')
+    fs.writeFileSync(variationsCsvPath, variationsCsvText, 'utf8')
+  } catch (err) {
+    console.warn(`Could not retain baseline CSVs for vendor ${vendorId}: ${err.message}`)
   }
-  return crypto.createHash('sha1').update(JSON.stringify(normalized)).digest('hex')
 }
 
-function productKey(row) {
-  return String(row.sku || '').trim()
-}
-
-function variationKey(row) {
-  return `${String(row.parent_sku || '').trim()}|${String(row.sku || '').trim()}`
-}
-
-/**
- * Compare new rows against last-import baseline. Returns only changed/new rows.
- */
-function diffRows(newRows, lastRows, keyFn) {
+function diffRows(currentRows, lastRows, keyFn) {
   if (!lastRows || lastRows.length === 0) {
     return {
-      changedRows: newRows,
-      skipped: 0,
-      changed: newRows.length,
+      changedRows: currentRows,
       fullImport: true,
+      skipped: 0,
+      total: currentRows.length,
     }
   }
 
   const lastMap = new Map()
-  for (const row of lastRows) {
-    const key = keyFn(row)
-    if (!key || key === '|') continue
-    lastMap.set(key, rowHash(row))
+  for (const r of lastRows) {
+    const k = keyFn(r)
+    if (k) lastMap.set(k, JSON.stringify(r))
   }
 
-  const changedRows = []
+  const changed = []
   let skipped = 0
-
-  for (const row of newRows) {
-    const key = keyFn(row)
-    if (!key || key === '|') {
-      changedRows.push(row)
-      continue
-    }
-    const hash = rowHash(row)
-    const prev = lastMap.get(key)
-    if (prev === hash) {
-      skipped++
+  for (const r of currentRows) {
+    const k = keyFn(r)
+    const curStr = JSON.stringify(r)
+    const prevStr = lastMap.get(k)
+    if (!prevStr || prevStr !== curStr) {
+      changed.push(r)
     } else {
-      changedRows.push(row)
+      skipped++
     }
   }
 
   return {
-    changedRows,
-    skipped,
-    changed: changedRows.length,
+    changedRows: changed,
     fullImport: false,
+    skipped,
+    total: currentRows.length,
   }
 }
 
-function retainLastImportFiles({ vendorId, parentCsvText, variationsCsvText }) {
-  const { dir, parentCsvPath, variationsCsvPath } = lastImportPaths(vendorId)
-  fs.mkdirSync(dir, { recursive: true })
-  fs.writeFileSync(parentCsvPath, parentCsvText, 'utf8')
-  fs.writeFileSync(variationsCsvPath, variationsCsvText, 'utf8')
-}
-
-async function loadLastImportRows(vendorId) {
-  const { parentCsvPath, variationsCsvPath } = lastImportPaths(vendorId)
-  if (!fs.existsSync(parentCsvPath) || !fs.existsSync(variationsCsvPath)) {
-    return { products: null, variations: null }
-  }
-  try {
-    const parentText = fs.readFileSync(parentCsvPath, 'utf8')
-    const variationsText = fs.readFileSync(variationsCsvPath, 'utf8')
-    return {
-      products: await parseCSV(parentText),
-      variations: await parseCSV(variationsText),
-    }
-  } catch (error) {
-    console.warn('Failed to read last Ralawise import baseline:', error.message)
-    return { products: null, variations: null }
-  }
-}
-
-/**
- * Download (or use provided CSV text), delta-filter vs last import, then upsert.
- * Supports resume via resumeFromStep + resumeOffset (row index within that step).
- */
 async function runRalawiseImport({
+  urls,
   storeId,
   vendorId,
-  userId,
+  userId = null,
   db,
-  urls = null,
-  parentCsvText = null,
-  variationsCsvText = null,
-  maxProductRows = null,
-  maxVariationRows = null,
-  workDir = null,
-  forcePlaywright = false,
-  onProgress = null,
-  shouldContinue = null,
-  resumeFromStep = null,
-  resumeOffset = 0,
-  initialProductCounters = null,
-  initialVariationCounters = null,
+  onProgress,
+  shouldContinue,
+  resumeFromStep,
+  resumeOffset,
+  initialProductCounters,
+  initialVariationCounters,
+  triggerSource = 'manual',
 }) {
   let productUploadId = null
   let variationUploadId = null
-  let catalog = null
 
-  const checkContinue = async () => {
+  async function checkContinue() {
     if (typeof shouldContinue === 'function') {
       const ok = await shouldContinue()
-      if (!ok) throw new ImportPausedError('Sync paused')
+      if (!ok) {
+        throw new ImportPausedError('Import paused by user')
+      }
     }
   }
 
   try {
-    let productsText = parentCsvText
-    let variationsText = variationsCsvText
-
-    if (!productsText || !variationsText) {
-      if (urls?._catalog?.parentCsvText && urls?._catalog?.variationsCsvText) {
-        await reportProgress(onProgress, {
-          step: 'connecting',
-          message: 'Using pre-fetched Ralawise catalog…',
-        })
-        catalog = urls._catalog
-        productsText = catalog.parentCsvText
-        variationsText = catalog.variationsCsvText
-      } else if (urls?.parentUrl && urls?.variationsUrl && urls.source === 'env') {
-        catalog = await downloadCatalog({
-          parentUrl: urls.parentUrl,
-          variationsUrl: urls.variationsUrl,
-          workDir: workDir || getRalawiseWorkDir('import'),
-          onProgress,
-        })
-        productsText = catalog.parentCsvText
-        variationsText = catalog.variationsCsvText
-      } else {
-        catalog = await fetchRalawiseCatalog({
-          workDir: workDir || getRalawiseWorkDir('import'),
-          forcePlaywright,
-          onProgress,
-        })
-        productsText = catalog.parentCsvText
-        variationsText = catalog.variationsCsvText
-      }
-    }
-
+    await reportProgress(onProgress, {
+      step: 'downloading',
+      message: 'Downloading supplier catalogs...',
+    })
     await checkContinue()
 
+    let catalog = null
+    let productsText = null
+    let variationsText = null
+
+    if (urls?.parentCsvText && urls?.variationsCsvText) {
+      productsText = urls.parentCsvText
+      variationsText = urls.variationsCsvText
+    } else {
+      catalog = await fetchRalawiseCatalog()
+      productsText = catalog.parentCsvText
+      variationsText = catalog.variationsCsvText
+    }
+
+    if (!productsText || !variationsText) {
+      throw new Error('Failed to download Ralawise catalog files')
+    }
+
     await reportProgress(onProgress, {
       step: 'delta',
-      message: 'Comparing to last import…',
-      current: 0,
-      total: 0,
+      message: 'Comparing against previous import...',
     })
+    await checkContinue()
 
-    let productRows = await parseCSV(productsText)
-    let variationRows = await parseCSV(variationsText)
+    const productRows = await parseCSV(productsText)
+    const variationRows = await parseCSV(variationsText)
 
-    if (maxProductRows != null) {
-      productRows = productRows.slice(0, maxProductRows)
-    }
-    if (maxVariationRows != null) {
-      variationRows = variationRows.slice(0, maxVariationRows)
-    }
+    const paths = lastImportPaths(vendorId)
+    const lastParentText = fs.existsSync(paths.parentCsvPath)
+      ? fs.readFileSync(paths.parentCsvPath, 'utf8')
+      : null
+    const lastVarText = fs.existsSync(paths.variationsCsvPath)
+      ? fs.readFileSync(paths.variationsCsvPath, 'utf8')
+      : null
 
-    const last = await loadLastImportRows(vendorId)
-    const productDiff = diffRows(productRows, last.products, productKey)
-    const variationDiff = diffRows(variationRows, last.variations, variationKey)
+    const lastProductRows = lastParentText ? await parseCSV(lastParentText) : null
+    const lastVarRows = lastVarText ? await parseCSV(lastVarText) : null
 
-    const productsSkipped = productDiff.skipped
-    const variationsSkipped = variationDiff.skipped
-    const productRowsToImport = productDiff.changedRows
-    const variationRowsToImport = variationDiff.changedRows
+    const productDiff = diffRows(
+      productRows,
+      lastProductRows,
+      (row) => String(row.sku || row.code || '').trim()
+    )
+    const variationDiff = diffRows(
+      variationRows,
+      lastVarRows,
+      (row) =>
+        `${String(row.parent_sku || row.primary_sku || '').trim()}|${String(row.sku || '').trim()}`
+    )
 
-    const deltaMessage = productDiff.fullImport
-      ? 'No previous import — full catalog'
-      : `Delta: ${productDiff.changed} products + ${variationDiff.changed} variations changed (${productsSkipped + variationsSkipped} unchanged skipped)`
+    const productRowsToImport = productDiff.changedRows || []
+    const variationRowsToImport = variationDiff.changedRows || []
+    const productsSkipped = Number(productDiff.skipped) || 0
+    const variationsSkipped = Number(variationDiff.skipped) || 0
 
     await reportProgress(onProgress, {
       step: 'delta',
-      message: deltaMessage,
-      current: productDiff.changed + variationDiff.changed,
-      total: productRows.length + variationRows.length,
+      message: `Delta check: ${productRowsToImport.length} products to import (${productsSkipped} skipped), ${variationRowsToImport.length} variations to import (${variationsSkipped} skipped).`,
       products_skipped: productsSkipped,
       variations_skipped: variationsSkipped,
     })
@@ -345,11 +300,12 @@ async function runRalawiseImport({
         fileType: 'products',
         fileName: 'wordpressdatafullparent.csv',
         rowCount: productRowsToImport.length,
+        triggerSource,
       })
 
       await reportProgress(onProgress, {
         step: 'importing_products',
-        message: `Importing products… (${productStartIndex} / ${productRowsToImport.length})`,
+        message: `Importing products... (${productStartIndex} / ${productRowsToImport.length})`,
         current: productStartIndex,
         total: productRowsToImport.length,
         products_skipped: productsSkipped,
@@ -376,7 +332,7 @@ async function runRalawiseImport({
           onProgress: async (p) => {
             await reportProgress(onProgress, {
               step: 'importing_products',
-              message: `Importing products… (${p.current} / ${p.total})`,
+              message: `Importing products... (${p.current} / ${p.total})`,
               current: p.current,
               total: p.total,
               newCount: p.newCount,
@@ -404,11 +360,12 @@ async function runRalawiseImport({
       fileType: 'variations',
       fileName: 'wordpressdatafullvariations.csv',
       rowCount: variationRowsToImport.length,
+      triggerSource,
     })
 
     await reportProgress(onProgress, {
       step: 'importing_variations',
-      message: `Importing variations… (${variationStartIndex} / ${variationRowsToImport.length})`,
+      message: `Importing variations... (${variationStartIndex} / ${variationRowsToImport.length})`,
       current: variationStartIndex,
       total: variationRowsToImport.length,
       products_new: productResult.newCount,
@@ -438,7 +395,7 @@ async function runRalawiseImport({
             onProgress: async (p) => {
               await reportProgress(onProgress, {
                 step: 'importing_variations',
-                message: `Importing variations… (${p.current} / ${p.total})`,
+                message: `Importing variations... (${p.current} / ${p.total})`,
                 current: p.current,
                 total: p.total,
                 newCount: p.newCount,

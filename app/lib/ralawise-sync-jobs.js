@@ -158,6 +158,12 @@ async function ensureJobsTable(db) {
     ALTER TABLE ralawise_sync_jobs ALTER COLUMN initiated_by DROP NOT NULL
   `).catch(() => {})
   await db.query(`
+    ALTER TABLE csv_uploads ALTER COLUMN uploaded_by DROP NOT NULL
+  `).catch(() => {})
+  await db.query(`
+    ALTER TABLE csv_uploads ADD COLUMN IF NOT EXISTS trigger_source VARCHAR(20) DEFAULT 'manual'
+  `).catch(() => {})
+  await db.query(`
     ALTER TABLE product_variations ALTER COLUMN csv_upload_id DROP NOT NULL
   `).catch(() => {})
   await db.query(`

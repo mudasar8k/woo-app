@@ -1,6 +1,6 @@
 /**
  * Automated test suite for Ralawise batched & scheduled sync engine,
- * scheduling, UK DST handling, duplicate run protection, force mode, and email notifications.
+ * scheduling, UK DST handling, duplicate run protection, force mode, system actor attribution, and email notifications.
  */
 
 require('dotenv').config({ path: '.env.local' })
@@ -25,6 +25,10 @@ const {
   resumeRalawiseSync,
   stopRalawiseSync,
 } = require('../app/lib/ralawise-batch-importer')
+const {
+  createCsvUploadRecord,
+  finalizeCsvUpload,
+} = require('../app/lib/ralawise-import')
 const {
   getUkDateString,
   getUkTimeComponents,
@@ -369,8 +373,55 @@ async function runTests() {
     })
     assert(forcePausedJob.isDue === false, 'force=true with paused job -> skipped')
 
+    // 16. System Actor & csv_uploads Attribution Tests
+    console.log('\n--- Test 16: System Actor & csv_uploads Attribution ---')
+    // A. Scheduled import with userId=null creates csv_uploads row with uploaded_by=null and trigger_source='scheduled'
+    const scheduledUploadId = await createCsvUploadRecord({
+      db,
+      storeId,
+      vendorId,
+      userId: null,
+      fileType: 'products',
+      fileName: 'wordpressdatafullparent.csv',
+      rowCount: 10,
+      triggerSource: 'scheduled',
+    })
+    assert(scheduledUploadId > 0, `createCsvUploadRecord succeeded for scheduled system import (id=${scheduledUploadId})`)
+
+    const schedUploadRow = await db.query('SELECT id, uploaded_by, trigger_source FROM csv_uploads WHERE id = $1', [scheduledUploadId])
+    assert(schedUploadRow.rows[0].uploaded_by === null, 'Scheduled import preserves uploaded_by=null (does not impersonate an admin)')
+    assert(schedUploadRow.rows[0].trigger_source === 'scheduled', 'Scheduled import records trigger_source=\'scheduled\'')
+
+    // B. Manual import preserves real admin userId
+    const manualUploadId = await createCsvUploadRecord({
+      db,
+      storeId,
+      vendorId,
+      userId: 2,
+      fileType: 'products',
+      fileName: 'manual_parent.csv',
+      rowCount: 5,
+      triggerSource: 'manual',
+    })
+    const manUploadRow = await db.query('SELECT id, uploaded_by, trigger_source FROM csv_uploads WHERE id = $1', [manualUploadId])
+    assert(Number(manUploadRow.rows[0].uploaded_by) === 2, 'Manual import preserves real admin userId')
+    assert(manUploadRow.rows[0].trigger_source === 'manual', 'Manual import records trigger_source=\'manual\'')
+
+    // C. Headless prepare with userId=null succeeds without not-null violation
+    const headlessPrep = await prepareRalawiseSync(db, {
+      storeId,
+      vendorId,
+      userId: null,
+      mockParentRows: mockParents,
+      mockVariationRows: mockVariations,
+      triggerSource: 'scheduled',
+      scheduledFor: ukDate,
+    })
+    assert(headlessPrep.ok === true, 'prepareRalawiseSync with userId=null succeeds without not-null violation')
+
     // Clean up test fixtures
-    await db.query('DELETE FROM ralawise_sync_jobs WHERE id IN ($1, $2, $3)', [jobId, emailTestJob.id, failJob.id])
+    await db.query('DELETE FROM ralawise_sync_jobs WHERE id IN ($1, $2, $3, $4)', [jobId, emailTestJob.id, failJob.id, headlessPrep.jobId])
+    await db.query('DELETE FROM csv_uploads WHERE id IN ($1, $2)', [scheduledUploadId, manualUploadId])
     await db.query(`DELETE FROM products WHERE sku LIKE 'TEST_P_%'`)
     console.log('Cleaned up test fixtures.')
 

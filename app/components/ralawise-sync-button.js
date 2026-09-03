@@ -288,19 +288,23 @@ export default function RalawiseSyncButton({
       return
     }
 
+    let isMounted = true
     const interval = setInterval(async () => {
       try {
         const res = await fetch(`/api/ralawise/sync/${job.jobId}/status`)
         const data = await safeFetchJson(res)
-        if (data?.ok) {
+        if (isMounted && data?.ok) {
           applyJob(data)
         }
       } catch {
-        // ignore polling glitches
+        // ignore polling network glitches
       }
     }, 3000)
 
-    return () => clearInterval(interval)
+    return () => {
+      isMounted = false
+      clearInterval(interval)
+    }
   }, [job?.jobId, job?.triggerSource, job?.status, applyJob])
 
   // Restore active or paused job from session/server on mount
@@ -321,7 +325,7 @@ export default function RalawiseSyncButton({
       fetch(`/api/ralawise/sync/${savedJobId}/status`)
         .then((r) => safeFetchJson(r))
         .then((data) => {
-          if (data && data.ok && data.status !== 'completed' && data.status !== 'failed') {
+          if (data && data.ok && data.status !== 'completed' && data.status !== 'failed' && data.status !== 'abandoned') {
             applyJob(data)
             if (isRunning(data.status) && data.triggerSource !== 'scheduled') {
               // Manual job on same tab -> resume browser loop
@@ -661,28 +665,28 @@ export default function RalawiseSyncButton({
       {status === 'completed' && (
         <div className="rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-800 space-y-1">
           <p className="font-medium">
-            {result?.no_changes
+            {job?.result?.no_changes || job?.no_changes
               ? 'No changes since last import'
               : 'Ralawise sync complete'}
           </p>
           <p>
-            Products: {job.products?.new ?? result?.products?.new ?? 0} new,{' '}
-            {job.products?.updated ?? result?.products?.updated ?? 0} updated
-            {(job.products?.skipped ?? result?.products?.skipped)
-              ? ` (${(job.products?.skipped ?? result?.products?.skipped).toLocaleString()} unchanged skipped)`
+            Products: {job?.products?.new ?? 0} new,{' '}
+            {job?.products?.updated ?? 0} updated
+            {job?.products?.skipped
+              ? ` (${Number(job.products.skipped).toLocaleString()} unchanged skipped)`
               : ''}
-            {(job.products?.errors ?? result?.products?.errorCount)
-              ? ` (${job.products?.errors ?? result?.products?.errorCount} errors)`
+            {job?.products?.errors
+              ? ` (${job.products.errors} errors)`
               : ''}
           </p>
           <p>
-            Variations: {job.variations?.new ?? result?.variations?.new ?? 0} new,{' '}
-            {job.variations?.updated ?? result?.variations?.updated ?? 0} updated
-            {(job.variations?.skipped ?? result?.variations?.skipped)
-              ? ` (${(job.variations?.skipped ?? result?.variations?.skipped).toLocaleString()} unchanged skipped)`
+            Variations: {job?.variations?.new ?? 0} new,{' '}
+            {job?.variations?.updated ?? 0} updated
+            {job?.variations?.skipped
+              ? ` (${Number(job.variations.skipped).toLocaleString()} unchanged skipped)`
               : ''}
-            {(job.variations?.errors ?? result?.variations?.errorCount)
-              ? ` (${job.variations?.errors ?? result?.variations?.errorCount} errors)`
+            {job?.variations?.errors
+              ? ` (${job.variations.errors} errors)`
               : ''}
           </p>
           <p className="text-xs text-green-700">

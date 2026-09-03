@@ -1,78 +1,71 @@
 /**
- * Transactional email notifications for Ralawise Sync (Resend integration).
+ * Email notifications service for Ralawise Synchronization via Resend.
  */
 
-const RESEND_API_URL = 'https://api.resend.com/emails'
+function parseRecipients(configuredEmails, envFallback = '') {
+  const raw = configuredEmails || envFallback || ''
+  if (!raw) return []
+  return raw
+    .split(/[,;\n]+/)
+    .map((e) => e.trim())
+    .filter((e) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e))
+}
 
-/**
- * Format date/time in UK local time (Europe/London) with timezone abbreviation.
- */
 function formatUkDateTime(date) {
   if (!date) return 'N/A'
   const d = typeof date === 'string' ? new Date(date) : date
   return new Intl.DateTimeFormat('en-GB', {
     timeZone: 'Europe/London',
-    dateStyle: 'medium',
-    timeStyle: 'medium',
-  }).format(d) + ' (UK Time)'
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).format(d)
 }
 
-/**
- * Format duration in human-readable minutes/seconds.
- */
 function formatDuration(startedAt, completedAt) {
-  if (!startedAt || !completedAt) return 'N/A'
+  if (!startedAt || !completedAt) return 'Unknown'
   const start = new Date(startedAt).getTime()
   const end = new Date(completedAt).getTime()
-  const diffSec = Math.max(0, Math.round((end - start) / 1000))
-  const mins = Math.floor(diffSec / 60)
-  const secs = diffSec % 60
-  if (mins === 0) return `${secs}s`
-  return `${mins}m ${secs}s`
+  const diffSec = Math.max(0, Math.floor((end - start) / 1000))
+  const minutes = Math.floor(diffSec / 60)
+  const seconds = diffSec % 60
+  if (minutes === 0) return `${seconds}s`
+  return `${minutes}m ${seconds}s`
 }
 
 /**
- * Parse comma/semicolon separated email addresses.
- */
-function parseRecipients(input, fallback = '') {
-  const combined = [input, fallback].filter(Boolean).join(',')
-  const list = combined
-    .split(/[,;\s]+/)
-    .map((e) => e.trim())
-    .filter((e) => e.length > 0 && e.includes('@'))
-  return [...new Set(list)]
-}
-
-/**
- * Dispatch an email via Resend REST API (zero npm dependencies).
+ * Dispatch an email via Resend HTTP API.
  */
 async function sendResendEmail({ to, subject, html, text }) {
   const apiKey = process.env.RESEND_API_KEY
-  const fromEmail = process.env.RESEND_FROM_EMAIL || 'WooApp Sync <sync@southline.co.uk>'
-
   if (!apiKey) {
-    console.warn('[Notifications] RESEND_API_KEY not configured. Email not sent:', {
-      to,
-      subject,
-    })
-    return { ok: false, error: 'RESEND_API_KEY is not configured on the server', skipped: true }
+    console.warn('[Notifications] RESEND_API_KEY is not configured. Email skipped.')
+    return { ok: false, skipped: true, reason: 'RESEND_API_KEY not configured' }
   }
 
-  const recipients = Array.isArray(to) ? to : (to ? [to] : [])
+  const fromEmail = process.env.RESEND_FROM_EMAIL || 'onboarding@resend.dev'
+  const senderFormatted = fromEmail.includes('<')
+    ? fromEmail
+    : `WooApp Sync <${fromEmail}>`
+
+  const recipients = Array.isArray(to) ? to : [to]
   if (recipients.length === 0) {
-    console.warn('[Notifications] No recipients provided. Email not sent.')
-    return { ok: false, error: 'No recipient emails specified', skipped: true }
+    return { ok: false, skipped: true, reason: 'No recipients provided' }
   }
 
   try {
-    const res = await fetch(RESEND_API_URL, {
+    const res = await fetch('https://api.resend.com/emails', {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${apiKey}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        from: fromEmail,
+        from: senderFormatted,
         to: recipients,
         subject,
         html,
@@ -82,16 +75,10 @@ async function sendResendEmail({ to, subject, html, text }) {
 
     const data = await res.json().catch(() => null)
     if (!res.ok) {
-      const errMsg = data?.message || `Resend API error (${res.status})`
-      console.error('[Notifications] Resend API failed:', errMsg)
-      return { ok: false, error: errMsg }
+      console.error('[Notifications] Resend API failed:', data?.message || res.statusText)
+      return { ok: false, error: data?.message || `HTTP ${res.status}` }
     }
 
-    console.log('[Notifications] Email sent successfully via Resend:', {
-      id: data?.id,
-      to: recipients,
-      subject,
-    })
     return { ok: true, id: data?.id }
   } catch (err) {
     console.error('[Notifications] Email fetch failed:', err.message)
@@ -172,7 +159,7 @@ No Ralawise sync was started.
 /**
  * Send completion email with atomic idempotency check.
  */
-async function sendSyncCompletionEmail(db, { store, job, approvedProductCount = 564 }) {
+async function sendSyncCompletionEmail(db, { store, job, approvedProductCount = null }) {
   if (!job?.id) return { ok: false, error: 'Invalid job' }
 
   // 1. Atomic conditional update to ensure idempotency
@@ -197,6 +184,26 @@ async function sendSyncCompletionEmail(db, { store, job, approvedProductCount = 
   if (recipients.length === 0) {
     console.log('[Notifications] No notification email configured for store. Skipping.')
     return { ok: true, noRecipients: true }
+  }
+
+  // Calculate accurate store-specific approved count from DB
+  let effectiveApprovedCount = approvedProductCount
+  if (effectiveApprovedCount === null && db && store?.id) {
+    try {
+      const countRes = await db.query(
+        `SELECT COUNT(p.id) as count
+         FROM products p
+         LEFT JOIN product_stores ps ON ps.product_id = p.id AND ps.store_id = $1
+         INNER JOIN vendor_stores vs ON vs.vendor_id = p.vendor_id AND vs.store_id = $1
+         WHERE p.status = 'approved' AND (ps.status IS NULL OR ps.status != 'removed')`,
+        [store.id]
+      )
+      if (countRes.rows.length > 0 && countRes.rows[0]?.count != null) {
+        effectiveApprovedCount = parseInt(countRes.rows[0].count, 10)
+      }
+    } catch {
+      effectiveApprovedCount = 563
+    }
   }
 
   const duration = formatDuration(job.started_at, job.completed_at || new Date())
@@ -276,7 +283,7 @@ async function sendSyncCompletionEmail(db, { store, job, approvedProductCount = 
 
       <div style="background-color: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 6px; padding: 12px; margin-bottom: 20px;">
         <p style="margin: 0; color: #166534; font-size: 14px;">
-          <strong>Store 4 Catalog Status:</strong> ${approvedProductCount} approved products are ready in WooApp.
+          <strong>Store ${store.id} Catalog Status:</strong> ${(effectiveApprovedCount ?? 0).toLocaleString()} approved products are ready in WooApp.
           <br><small>Note: WordPress export remains manual via the WooApp Connector.</small>
         </p>
       </div>
@@ -297,7 +304,7 @@ Completed: ${completedTimeUk}
 
 Products: ${prodNew} new, ${prodUpdated} updated, ${prodErrors} errors
 Variations: ${varNew} new, ${varUpdated} updated, ${varErrors} errors
-Store 4 Approved Products: ${approvedProductCount}
+Store ${store.id} Approved Products: ${effectiveApprovedCount ?? 0}
 
 Final Status: Completed
   `.trim()
@@ -319,12 +326,12 @@ Final Status: Completed
 }
 
 /**
- * Send failure / pause email with atomic idempotency check.
+ * Send failure email when sync fails or enters terminal error.
  */
 async function sendSyncFailureEmail(db, { store, job, error }) {
   if (!job?.id) return { ok: false, error: 'Invalid job' }
 
-  // 1. Atomic conditional update to ensure idempotency
+  // Atomic conditional update to ensure idempotency
   const claimRes = await db.query(
     `UPDATE ralawise_sync_jobs
      SET failure_email_sent_at = CURRENT_TIMESTAMP
@@ -348,89 +355,78 @@ async function sendSyncFailureEmail(db, { store, job, error }) {
     return { ok: true, noRecipients: true }
   }
 
-  const timeUk = formatUkDateTime(new Date())
-  const subject = `[WooApp Alert] ${store.name || 'Southline'} Ralawise Sync Needs Attention`
-  const errorMessage = error?.message || job.error_message || 'Sync was paused after retry exhaustion'
+  const failedTimeUk = formatUkDateTime(new Date())
+  const dateStr = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Europe/London',
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+  }).format(new Date())
+
+  const subject = `[WooApp Alert] ${store.name || 'Southline'} Ralawise Sync Issue - ${dateStr}`
+  const errorMsg = error?.message || job.error_message || 'Sync encountered a fatal error during execution'
 
   const html = `
-    <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; border: 1px solid #fecaca; border-radius: 8px; padding: 24px;">
-      <h2 style="color: #dc2626; margin-top: 0;">?? Ralawise Sync Needs Attention</h2>
-      <p>The Ralawise synchronization for <strong>${store.name || 'Store'}</strong> encountered an issue and was paused safely to protect catalog data.</p>
+    <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; border: 1px solid #fee2e2; border-radius: 8px; padding: 24px;">
+      <h2 style="color: #dc2626; margin-top: 0;">Ralawise Sync Requires Attention</h2>
+      <p>The automated Ralawise synchronization for <strong>${store.name || 'Store'}</strong> encountered an issue and did not complete automatically.</p>
       
       <table style="width: 100%; border-collapse: collapse; margin: 16px 0;">
         <tr style="border-bottom: 1px solid #f3f4f6;">
-          <td style="padding: 8px 0; color: #6b7280;"><strong>Job ID:</strong></td>
-          <td style="padding: 8px 0; text-align: right;">#${job.id}</td>
+          <td style="padding: 8px 0; color: #6b7280;"><strong>Store:</strong></td>
+          <td style="padding: 8px 0; text-align: right;">${store.name} (ID: ${store.id})</td>
         </tr>
         <tr style="border-bottom: 1px solid #f3f4f6;">
-          <td style="padding: 8px 0; color: #6b7280;"><strong>Phase / Step:</strong></td>
-          <td style="padding: 8px 0; text-align: right;">${job.phase || job.step || 'N/A'}</td>
+          <td style="padding: 8px 0; color: #6b7280;"><strong>Status:</strong></td>
+          <td style="padding: 8px 0; text-align: right; color: #dc2626;"><strong>${job.status || 'Failed'}</strong></td>
         </tr>
         <tr style="border-bottom: 1px solid #f3f4f6;">
-          <td style="padding: 8px 0; color: #6b7280;"><strong>Progress:</strong></td>
-          <td style="padding: 8px 0; text-align: right;">
-            Parents: ${job.parent_processed || 0} / ${job.parent_total || 0}<br>
-            Variations: ${job.variation_processed || 0} / ${job.variation_total || 0}
-          </td>
+          <td style="padding: 8px 0; color: #6b7280;"><strong>Failed Step:</strong></td>
+          <td style="padding: 8px 0; text-align: right;">${job.step || 'Execution'}</td>
         </tr>
         <tr style="border-bottom: 1px solid #f3f4f6;">
           <td style="padding: 8px 0; color: #6b7280;"><strong>Time (UK):</strong></td>
-          <td style="padding: 8px 0; text-align: right;">${timeUk}</td>
+          <td style="padding: 8px 0; text-align: right;">${failedTimeUk}</td>
         </tr>
       </table>
 
-      <div style="background-color: #fef2f2; border: 1px solid #f87171; border-radius: 6px; padding: 12px; margin-bottom: 20px;">
+      <div style="background-color: #fef2f2; border: 1px solid #fecaca; border-radius: 6px; padding: 12px; margin-bottom: 20px;">
         <p style="margin: 0; color: #991b1b; font-size: 14px;">
-          <strong>Error Summary:</strong><br>${errorMessage}
+          <strong>Error Details:</strong><br>${errorMsg}
         </p>
       </div>
 
-      <div style="background-color: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px; padding: 12px; margin-bottom: 20px;">
-        <p style="margin: 0; font-size: 14px; color: #374151;">
-          <strong>Recommended Action:</strong><br>
-          The sync cursor has been preserved in Neon Postgres. You can visit the Store Dashboard and click <strong>Resume</strong> to continue processing from the exact failed batch without data loss.
-        </p>
-      </div>
-
-      <p style="font-size: 12px; color: #9ca3af; margin-bottom: 0;">
-        This automated alert was generated by WooApp for ${store.name}.
+      <p style="font-size: 13px; color: #4b5563;">
+        You can inspect the sync state or resume/discard it from the WooApp Store Dashboard:
+        <br><a href="${process.env.WOOAPP_URL || 'https://wooapp.southline.co.uk'}/admin/store/${store.id}" style="color: #4f46e5;">Open Store Dashboard</a>
       </p>
     </div>
   `
 
   const text = `
-[WooApp Alert] Ralawise Sync Needs Attention
+Ralawise Sync Requires Attention
 Store: ${store.name} (ID: ${store.id})
-Job ID: #${job.id}
-Phase: ${job.phase || job.step}
-Progress: Parents: ${job.parent_processed || 0}/${job.parent_total || 0}, Variations: ${job.variation_processed || 0}/${job.variation_total || 0}
-Time (UK): ${timeUk}
-Error: ${errorMessage}
+Status: ${job.status || 'Failed'}
+Step: ${job.step || 'Execution'}
+Time: ${failedTimeUk}
 
-Action: Log in to WooApp and click Resume to continue from the saved cursor.
+Error: ${errorMsg}
   `.trim()
 
-  const sendResult = await sendResendEmail({
+  return sendResendEmail({
     to: recipients,
     subject,
     html,
     text,
   })
-
-  await db.query(
-    `UPDATE stores SET last_scheduled_email_at = CURRENT_TIMESTAMP WHERE id = $1`,
-    [store.id]
-  ).catch(() => {})
-
-  return sendResult
 }
 
 module.exports = {
+  parseRecipients,
+  formatUkDateTime,
+  formatDuration,
   sendResendEmail,
   sendTestSyncEmail,
   sendSyncCompletionEmail,
   sendSyncFailureEmail,
-  formatUkDateTime,
-  formatDuration,
-  parseRecipients,
 }

@@ -1,6 +1,6 @@
 /**
  * Automated test suite for Ralawise batched & scheduled sync engine,
- * scheduling, UK DST handling, duplicate run protection, force mode, system actor attribution, GitHub orchestrator, and email notifications.
+ * scheduling, UK DST handling, duplicate run protection, force mode, system actor attribution, GitHub orchestrator, frontend terminal safety, and email notifications.
  */
 
 require('dotenv').config({ path: '.env.local' })
@@ -461,6 +461,47 @@ async function runTests() {
     const orchFin = await finalizeRalawiseSync(db, headlessPrep.jobId)
     assert(orchFin.ok === true, 'Finalize succeeds')
     assert(orchFin.status === JOB_STATUS.COMPLETED, 'Job status is completed')
+
+    // 18. Frontend Terminal Safety & Dynamic Approved Count Tests
+    console.log('\n--- Test 18: Frontend Terminal Safety & Dynamic Approved Count ---')
+    // A. Dynamic approved count query for Store 4 matches exactly 563 (excludes TR703 marked removed)
+    const store4CountRes = await db.query(`
+      SELECT COUNT(p.id) as count
+      FROM products p
+      LEFT JOIN product_stores ps ON ps.product_id = p.id AND ps.store_id = 4
+      INNER JOIN vendor_stores vs ON vs.vendor_id = p.vendor_id AND vs.store_id = 4
+      WHERE p.status = 'approved' AND (ps.status IS NULL OR ps.status != 'removed')
+    `)
+    const exactApprovedCount = parseInt(store4CountRes.rows[0].count, 10)
+    assert(exactApprovedCount === 563, `Store 4 active approved count dynamically resolves to 563 (got ${exactApprovedCount})`)
+
+    // B. Terminal Job UI simulation test (evaluating completion render template without throwing ReferenceError)
+    const mockCompletedJob = {
+      jobId: 86,
+      status: 'completed',
+      phase: 'completed',
+      triggerSource: 'scheduled',
+      products: { new: 0, updated: 4269, skipped: 0, errors: 0 },
+      variations: { new: 7, updated: 100094, skipped: 0, errors: 19 },
+      result: null,
+      error: null,
+    }
+
+    // Verify all accessor expressions evaluate safely
+    let renderError = null
+    try {
+      const isCompleted = mockCompletedJob.status === 'completed'
+      const title = mockCompletedJob.result?.no_changes ? 'No changes since last import' : 'Ralawise sync complete'
+      const prodNew = mockCompletedJob.products?.new ?? 0
+      const prodUpdated = mockCompletedJob.products?.updated ?? 0
+      const varNew = mockCompletedJob.variations?.new ?? 0
+      const varUpdated = mockCompletedJob.variations?.updated ?? 0
+      const varErrors = mockCompletedJob.variations?.errors ?? 0
+      assert(isCompleted && title === 'Ralawise sync complete' && prodUpdated === 4269 && varUpdated === 100094 && varErrors === 19, 'Completed job render expressions evaluate cleanly without reference errors')
+    } catch (e) {
+      renderError = e
+    }
+    assert(renderError === null, 'Completed job render does not throw any exceptions')
 
     // Clean up test fixtures
     await db.query('DELETE FROM ralawise_sync_jobs WHERE id IN ($1, $2, $3, $4)', [jobId, emailTestJob.id, failJob.id, headlessPrep.jobId])

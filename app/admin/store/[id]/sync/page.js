@@ -2,6 +2,7 @@ import { requireAdmin } from '../../../../lib/auth'
 import db from '../../../../lib/db'
 import { redirect } from 'next/navigation'
 import SyncManagement from '../../../../components/sync-management'
+import AutomaticSyncSettings from '../../../../components/AutomaticSyncSettings'
 
 export default async function SyncPage({ params }) {
   const session = await requireAdmin()
@@ -48,11 +49,14 @@ export default async function SyncPage({ params }) {
   )
 
   return (
-    <div>
-      <div className="mb-6">
+    <div className="space-y-6">
+      <div>
         <h1 className="text-3xl font-bold text-gray-900">Sync Management</h1>
         <p className="text-gray-600 mt-1">Store: {store.name}</p>
       </div>
+
+      <AutomaticSyncSettings storeId={store.id} storeName={store.name} />
+
       <SyncManagement
         store={store}
         syncLogs={logsResult.rows}

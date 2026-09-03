@@ -1,0 +1,34 @@
+name: Ralawise Daily Scheduled Sync
+
+on:
+  schedule:
+    # Check hourly so admin-configured custom times (e.g. 14:00 UK) trigger accurately
+    - cron: '0 * * * *'
+  workflow_dispatch:
+    inputs:
+      force_run:
+        description: 'Force execution even if not due'
+        required: false
+        default: 'false'
+
+jobs:
+  check-and-sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check & Trigger Scheduled Sync
+        run: |
+          WOOAPP_URL="${{ secrets.WOOAPP_URL || 'https://wooapp.southline.co.uk' }}"
+          CRON_SECRET="${{ secrets.RALAWISE_SYNC_CRON_SECRET }}"
+          
+          if [ -z "$CRON_SECRET" ]; then
+            echo "RALAWISE_SYNC_CRON_SECRET is not configured in GitHub Secrets. Exiting safely."
+            exit 0
+          fi
+          
+          echo "Triggering Ralawise scheduled sync check against $WOOAPP_URL..."
+          RESPONSE=$(curl -s -X POST "$WOOAPP_URL/api/ralawise/scheduled-sync/check" \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            -H "Content-Type: application/json")
+          
+          echo "Response from WooApp:"
+          echo "$RESPONSE"

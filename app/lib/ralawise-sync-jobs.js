@@ -75,6 +75,11 @@ const CREATE_TABLE_SQL = `
     cancel_requested BOOLEAN DEFAULT FALSE,
     csv_upload_parent_id INTEGER,
     csv_upload_var_id INTEGER,
+    trigger_source VARCHAR(20) DEFAULT 'manual',
+    scheduled_for VARCHAR(20),
+    completion_email_sent_at TIMESTAMP,
+    failure_email_sent_at TIMESTAMP,
+    error_samples JSONB,
     result_json JSONB,
     error_message TEXT,
     started_at TIMESTAMP,
@@ -125,6 +130,11 @@ const ALTER_COLUMNS = [
   ['cancel_requested', 'BOOLEAN DEFAULT FALSE'],
   ['csv_upload_parent_id', 'INTEGER'],
   ['csv_upload_var_id', 'INTEGER'],
+  ['trigger_source', "VARCHAR(20) DEFAULT 'manual'"],
+  ['scheduled_for', 'VARCHAR(20)'],
+  ['completion_email_sent_at', 'TIMESTAMP'],
+  ['failure_email_sent_at', 'TIMESTAMP'],
+  ['error_samples', 'JSONB'],
   ['result_json', 'JSONB'],
   ['error_message', 'TEXT'],
   ['started_at', 'TIMESTAMP'],
@@ -178,12 +188,12 @@ async function ensureJobsTable(db) {
   tableReady = true
 }
 
-async function createSyncJob(db, { storeId, vendorId, userId }) {
+async function createSyncJob(db, { storeId, vendorId, userId, triggerSource = 'manual', scheduledFor = null }) {
   await ensureJobsTable(db)
   const result = await db.query(
     `INSERT INTO ralawise_sync_jobs
-       (store_id, vendor_id, initiated_by, status, step, phase, message, started_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP)
+       (store_id, vendor_id, initiated_by, status, step, phase, message, trigger_source, scheduled_for, started_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, CURRENT_TIMESTAMP)
      RETURNING *`,
     [
       storeId,
@@ -193,6 +203,8 @@ async function createSyncJob(db, { storeId, vendorId, userId }) {
       JOB_STATUS.QUEUED,
       'prepare',
       'Queued',
+      triggerSource || 'manual',
+      scheduledFor || null,
     ]
   )
   return result.rows[0]
@@ -229,6 +241,11 @@ async function updateSyncJob(db, jobId, fields = {}) {
     'cancel_requested',
     'csv_upload_parent_id',
     'csv_upload_var_id',
+    'trigger_source',
+    'scheduled_for',
+    'completion_email_sent_at',
+    'failure_email_sent_at',
+    'error_samples',
     'result_json',
     'error_message',
     'started_at',
@@ -272,25 +289,14 @@ async function getSyncJob(db, jobId) {
 
 async function getActiveSyncJobForStore(db, storeId) {
   await ensureJobsTable(db)
-  // Fetch the single most-recent job for this store, then decide whether it is
-  // "active". We must NOT look past a terminal job to find older stale rows —
-  // that would cause a crashed job from a previous session to be rediscovered
-  // and re-run automatically after a later sync has already completed.
   const result = await db.query(
     `SELECT * FROM ralawise_sync_jobs
-     WHERE store_id = $1
+     WHERE store_id = $1 AND status NOT IN ('completed', 'failed', 'abandoned')
      ORDER BY id DESC
      LIMIT 1`,
     [storeId]
   )
-  const row = result.rows[0]
-  if (!row) return null
-  if (
-    row.status === JOB_STATUS.COMPLETED ||
-    row.status === JOB_STATUS.FAILED ||
-    row.status === JOB_STATUS.ABANDONED
-  ) return null
-  return row
+  return result.rows[0] || null
 }
 
 async function saveJobPayloads(db, jobId, { parentRows, variationRows, rawParentText, rawVarText }) {
@@ -384,6 +390,8 @@ function serializeJob(row) {
     step: row.step,
     phase: row.phase || 'prepare',
     message: row.message,
+    triggerSource: row.trigger_source || 'manual',
+    scheduledFor: row.scheduled_for || null,
     current: grandProcessed,
     total: grandTotal,
     parentTotal,
@@ -408,6 +416,8 @@ function serializeJob(row) {
     },
     result: row.result_json || null,
     error: row.error_message || null,
+    completionEmailSentAt: row.completion_email_sent_at,
+    failureEmailSentAt: row.failure_email_sent_at,
     startedAt: row.started_at,
     completedAt: row.completed_at,
     createdAt: row.created_at,
@@ -420,11 +430,7 @@ function serializeJob(row) {
  */
 async function assertJobNotPaused(db, jobId) {
   const job = await getSyncJob(db, jobId)
-  if (
-    job?.status === JOB_STATUS.PAUSED ||
-    job?.status === JOB_STATUS.ABANDONED ||
-    job?.cancel_requested
-  ) {
+  if (job?.status === JOB_STATUS.PAUSED || job?.cancel_requested) {
     throw new SyncPausedError(
       job.message || 'Sync paused - click Resume to continue'
     )

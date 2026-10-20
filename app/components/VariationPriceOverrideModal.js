@@ -365,7 +365,6 @@ export default function VariationPriceOverrideModal({
       }
 
       setSelectedVarIds(new Set())
-      if (onSaved) onSaved()
     } catch (err) {
       setError(err.message || 'Bulk operation failed')
     } finally {

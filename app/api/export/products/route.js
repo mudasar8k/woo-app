@@ -65,6 +65,7 @@ function serializeProduct(row, variations, storeContext, rangeRules, productOver
     images: splitList(row.images),
     brand: row.brand || null,
     vendor: row.vendor_name || null,
+    attributes: row.attributes || null,
     fabric: row.fabric || null,
     weight: row.weight || null,
     size_description: row.size_description || null,
@@ -104,6 +105,7 @@ export async function GET(request) {
     )
     const offset = parseInt(searchParams.get('offset') || '0', 10) || 0
     const updatedSince = searchParams.get('updated_since')
+    const includeVariations = searchParams.get('include_variations') !== 'false'
 
     const conditions = [`p.status = 'approved'`, `(ps.status IS NULL OR ps.status != 'removed')`]
     const params = []
@@ -141,12 +143,18 @@ export async function GET(request) {
     let productOverridesMap = new Map()
 
     if (productIds.length > 0) {
-      // Parallel batch fetch: variations + product pricing overrides (Zero N+1 queries)
+      // Parallel batch fetch: optional variations + product pricing overrides.
+      // Parent-only maintenance consumers can set include_variations=false
+      // to avoid transferring or processing variation payloads.
+      const variationsPromise = includeVariations
+        ? db.query(
+            `SELECT * FROM product_variations WHERE product_id = ANY($1::int[]) ORDER BY id ASC`,
+            [productIds]
+          )
+        : Promise.resolve({ rows: [] })
+
       const [variationsResult, overridesMap] = await Promise.all([
-        db.query(
-          `SELECT * FROM product_variations WHERE product_id = ANY($1::int[]) ORDER BY id ASC`,
-          [productIds]
-        ),
+        variationsPromise,
         loadProductStoreOverrides(db, storeId, productIds),
       ])
 

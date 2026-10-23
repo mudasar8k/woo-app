@@ -270,9 +270,20 @@ export async function POST(request, { params }) {
         return wooAttributes
       }
 
-      const appendProductLevelAttributes = (wooAttributes = []) => {
+      const appendProductLevelAttributes = async (wooAttributes = []) => {
         const attributes = [...wooAttributes]
         let position = attributes.length
+
+        const filterAttributes = await wooClient.buildGlobalFilterAttributes(
+          product.attributes
+        )
+
+        for (const attribute of filterAttributes) {
+          attributes.push({
+            ...attribute,
+            position: position++,
+          })
+        }
 
         if (product.brand) {
           attributes.push({
@@ -412,7 +423,7 @@ export async function POST(request, { params }) {
       // Simple products get Brand/Vendor on create; variable products set them in STEP 2
       // alongside Colour/Size so a later attributes update does not wipe brand.
       if (!hasVariations) {
-        const productLevelAttributes = appendProductLevelAttributes([])
+        const productLevelAttributes = await appendProductLevelAttributes([])
         if (productLevelAttributes.length > 0) {
           wooProductData.attributes = productLevelAttributes
         }
@@ -481,7 +492,7 @@ export async function POST(request, { params }) {
           allVariationsForAttributes = attrResult.rows
         }
         
-        const wooAttributes = appendProductLevelAttributes(
+        const wooAttributes = await appendProductLevelAttributes(
           extractAttributesFromVariations(allVariationsForAttributes)
         )
 
@@ -501,7 +512,7 @@ export async function POST(request, { params }) {
         }
       } else if (!hasVariations && (product.brand || product.vendor_name) && wooProduct?.id) {
         // Ensure Brand/Vendor stick on update of existing simple products
-        const productLevelAttributes = appendProductLevelAttributes([])
+        const productLevelAttributes = await appendProductLevelAttributes([])
         const simpleUpdate = {
           attributes: productLevelAttributes,
         }

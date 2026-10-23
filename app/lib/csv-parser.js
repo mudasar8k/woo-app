@@ -100,9 +100,6 @@ function parseProductRow(row) {
   if (row.attributesize) {
     attributes.push(`Size: ${row.attributesize}`)
   }
-  // Add other attributes if needed
-  const attributesString = attributes.length > 0 ? attributes.join('; ') : (row.attributes || null)
-
   // Brand is a single-value (non-variation) attribute. Accept the common
   // header shapes an "attribute:pa_Brand" / "attribute:Brand" / "brand"
   // column normalizes to after transformHeader() strips punctuation.
@@ -124,6 +121,77 @@ function parseProductRow(row) {
     row.weight ||
     row.fabric_weight ||
     null
+
+  // Shop-filter attributes from the Ralawise/WooApp parent CSV.
+  // Keep the original Fabric/Weight specification fields untouched.
+  const genderValue =
+    row.attributepa_gender ||
+    row.attributegender ||
+    row.pa_gender ||
+    row.gender ||
+    null
+
+  const fabricFilterValue =
+    row.attributepa_fabricfilter ||
+    row.attributefabricfilter ||
+    row.pa_fabricfilter ||
+    row.fabricfilter ||
+    row.fabric_filter ||
+    null
+
+  const ageGroupValue =
+    row.attributeagegroup ||
+    row.attributepa_agegroup ||
+    row.pa_agegroup ||
+    row.agegroup ||
+    row.age_group ||
+    null
+
+  // Only classify values that explicitly identify themselves as GSM/GMS/g/m2.
+  // Non-GSM weights such as "12 Gauge", "300D", "oz" or "kg" remain available
+  // as the raw Weight specification but are not forced into a GSM filter.
+  const weightGsmBucket = (() => {
+    const raw = String(weightValue || '').trim()
+    if (!raw || !/(?:gsm|gms|g\/m(?:2|\u00B2))/i.test(raw)) {
+      return null
+    }
+
+    const gsmMatch = raw.match(
+      /(\d+(?:\.\d+)?)\s*(?:gsm|gms|g\/m(?:2|\u00B2))/i
+    )
+    if (!gsmMatch) {
+      return null
+    }
+
+    const gsm = Number(gsmMatch[1])
+    if (!Number.isFinite(gsm) || gsm < 0) {
+      return null
+    }
+
+    if (gsm <= 50) return '0 - 50gsm'
+    if (gsm <= 100) return '51 - 100gsm'
+    if (gsm <= 150) return '101 - 150gsm'
+    if (gsm <= 200) return '151 - 200gsm'
+    if (gsm <= 250) return '201 - 250gsm'
+    if (gsm <= 300) return '251 - 300gsm'
+    return 'Over 300gsm'
+  })()
+
+  if (genderValue) {
+    attributes.push(`Gender: ${String(genderValue).trim()}`)
+  }
+  if (fabricFilterValue) {
+    attributes.push(`Fabric Filter: ${String(fabricFilterValue).trim()}`)
+  }
+  if (weightGsmBucket) {
+    attributes.push(`Weight GSM: ${weightGsmBucket}`)
+  }
+  if (ageGroupValue) {
+    attributes.push(`Age Group: ${String(ageGroupValue).trim()}`)
+  }
+
+  const attributesString =
+    attributes.length > 0 ? attributes.join('; ') : (row.attributes || null)
 
   const sizeDescValue =
     row.attributesize_description ||

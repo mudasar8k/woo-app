@@ -15,6 +15,11 @@ class WooCommerceClient {
       },
       timeout: 120000, // Increased to 120 seconds for large batch operations
     })
+
+    // Cache global attribute/term lookups during a sync request so thousands
+    // of products do not repeatedly query the same WooCommerce endpoints.
+    this.productAttributeCache = new Map()
+    this.productAttributeTermCache = new Map()
   }
 
   async createProduct(productData) {
@@ -134,6 +139,179 @@ class WooCommerceClient {
       )
       return null
     }
+  }
+
+  async getOrCreateProductAttribute(name, slug) {
+    const cleanName = String(name || '').trim()
+    const cleanSlug = String(slug || '')
+      .trim()
+      .toLowerCase()
+      .replace(/^pa_/, '')
+
+    if (!cleanName || !cleanSlug) return null
+
+    if (this.productAttributeCache.has(cleanSlug)) {
+      return this.productAttributeCache.get(cleanSlug)
+    }
+
+    const response = await this.client.get('products/attributes', {
+      params: { per_page: 100 },
+    })
+
+    const existing = (response.data || []).find((attribute) => {
+      const apiSlug = String(attribute.slug || '')
+        .toLowerCase()
+        .replace(/^pa_/, '')
+
+      return (
+        apiSlug === cleanSlug ||
+        String(attribute.name || '').toLowerCase() === cleanName.toLowerCase()
+      )
+    })
+
+    if (existing?.id) {
+      this.productAttributeCache.set(cleanSlug, existing.id)
+      return existing.id
+    }
+
+    const created = await this.client.post('products/attributes', {
+      name: cleanName,
+      slug: cleanSlug,
+      type: 'select',
+      order_by: 'menu_order',
+      has_archives: true,
+    })
+
+    const id = created.data?.id || null
+    if (id) {
+      this.productAttributeCache.set(cleanSlug, id)
+    }
+
+    return id
+  }
+
+  async getOrCreateProductAttributeTerm(attributeId, termName) {
+    const name = String(termName || '').trim()
+    if (!attributeId || !name) return null
+
+    const cacheKey = `${attributeId}:${name.toLowerCase()}`
+
+    if (this.productAttributeTermCache.has(cacheKey)) {
+      return this.productAttributeTermCache.get(cacheKey)
+    }
+
+    const response = await this.client.get(
+      `products/attributes/${attributeId}/terms`,
+      {
+        params: {
+          search: name,
+          per_page: 100,
+        },
+      }
+    )
+
+    const existing = (response.data || []).find(
+      (term) => String(term.name || '').toLowerCase() === name.toLowerCase()
+    )
+
+    if (existing?.id) {
+      this.productAttributeTermCache.set(cacheKey, existing.id)
+      return existing.id
+    }
+
+    const created = await this.client.post(
+      `products/attributes/${attributeId}/terms`,
+      { name }
+    )
+
+    const id = created.data?.id || null
+    if (id) {
+      this.productAttributeTermCache.set(cacheKey, id)
+    }
+
+    return id
+  }
+
+  async buildGlobalFilterAttributes(attributesText) {
+    const text = String(attributesText || '').trim()
+    if (!text) return []
+
+    const parsed = new Map()
+
+    for (const pair of text.split(';').map((value) => value.trim()).filter(Boolean)) {
+      const colonIndex = pair.indexOf(':')
+      const equalsIndex = pair.indexOf('=')
+
+      let separatorIndex = -1
+      if (colonIndex >= 0 && equalsIndex >= 0) {
+        separatorIndex = Math.min(colonIndex, equalsIndex)
+      } else if (colonIndex >= 0) {
+        separatorIndex = colonIndex
+      } else if (equalsIndex >= 0) {
+        separatorIndex = equalsIndex
+      }
+
+      if (separatorIndex <= 0) continue
+
+      const key = pair
+        .slice(0, separatorIndex)
+        .trim()
+        .toLowerCase()
+        .replace(/\s+/g, ' ')
+
+      const value = pair.slice(separatorIndex + 1).trim()
+      if (key && value) {
+        parsed.set(key, value)
+      }
+    }
+
+    const definitions = [
+      {
+        sourceKey: 'gender',
+        name: 'Gender',
+        slug: 'gender',
+      },
+      {
+        sourceKey: 'fabric filter',
+        name: 'Fabric',
+        slug: 'fabric',
+      },
+      {
+        sourceKey: 'weight gsm',
+        name: 'Weight (GSM)',
+        slug: 'weight_gsm',
+      },
+      {
+        sourceKey: 'age group',
+        name: 'Age Group',
+        slug: 'agegroup',
+      },
+    ]
+
+    const attributes = []
+
+    for (const definition of definitions) {
+      const value = parsed.get(definition.sourceKey)
+      if (!value) continue
+
+      const attributeId = await this.getOrCreateProductAttribute(
+        definition.name,
+        definition.slug
+      )
+
+      if (!attributeId) continue
+
+      await this.getOrCreateProductAttributeTerm(attributeId, value)
+
+      attributes.push({
+        id: attributeId,
+        visible: true,
+        variation: false,
+        options: [value],
+      })
+    }
+
+    return attributes
   }
 
   async getProduct(productId) {

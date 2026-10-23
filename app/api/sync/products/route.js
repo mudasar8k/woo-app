@@ -363,9 +363,20 @@ export async function POST(request) {
           }
         }
 
-        // Product-level attributes: Brand and Vendor (non-variation)
+        // Product-level attributes: global shop filters + Brand/Vendor.
         const productAttributes = [...(wooProductData.attributes || [])]
         let attrPosition = productAttributes.length
+
+        const filterAttributes = await wooClient.buildGlobalFilterAttributes(
+          product.attributes
+        )
+
+        for (const attribute of filterAttributes) {
+          productAttributes.push({
+            ...attribute,
+            position: attrPosition++,
+          })
+        }
 
         if (product.brand) {
           productAttributes.push({

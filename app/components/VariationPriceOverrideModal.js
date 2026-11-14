@@ -11,7 +11,6 @@ export default function VariationPriceOverrideModal({
   storeId,
   productId,
   product,
-  onSaved,
 }) {
   const [loading, setLoading] = useState(false)
   const [fetching, setFetching] = useState(true)
@@ -29,6 +28,7 @@ export default function VariationPriceOverrideModal({
   // Local edits map: variationId => { override_type, custom_markup_percent, fixed_price }
   const [rowEdits, setRowEdits] = useState({})
   const [savingRowId, setSavingRowId] = useState(null)
+  const [savedRowIds, setSavedRowIds] = useState(new Set())
 
   // Bulk selection
   const [selectedVarIds, setSelectedVarIds] = useState(new Set())
@@ -215,7 +215,19 @@ export default function VariationPriceOverrideModal({
       )
 
       setSuccess(`Saved override for ${v.sku || `Variation #${v.id}`}`)
-      if (onSaved) onSaved()
+      setSavedRowIds((prev) => {
+        const next = new Set(prev)
+        next.add(v.id)
+        return next
+      })
+      setTimeout(() => {
+        setSavedRowIds((prev) => {
+          const next = new Set(prev)
+          next.delete(v.id)
+          return next
+        })
+        setSuccess('')
+      }, 2500)
     } catch (err) {
       setError(err.message || 'Failed to save override')
     } finally {
@@ -258,7 +270,7 @@ export default function VariationPriceOverrideModal({
       }
 
       setSuccess(`Reset ${v.sku || `Variation #${v.id}`} to product pricing`)
-      if (onSaved) onSaved()
+      setTimeout(() => setSuccess(''), 2500)
     } catch (err) {
       setError(err.message || 'Failed to reset override')
     } finally {
@@ -569,6 +581,7 @@ export default function VariationPriceOverrideModal({
                   const isOverridden = edit.override_type !== 'product_rules'
                   const calculatedPrice = getRowCalculatedPrice(v)
                   const isSaving = savingRowId === v.id
+                  const isSaved = savedRowIds.has(v.id)
 
                   return (
                     <tr
@@ -657,10 +670,14 @@ export default function VariationPriceOverrideModal({
                             <button
                               type="button"
                               onClick={() => handleSaveSingleRow(v)}
-                              disabled={isSaving}
-                              className="px-2.5 py-1 bg-indigo-600 text-white text-[11px] font-bold rounded hover:bg-indigo-700 disabled:opacity-50"
+                              disabled={isSaving || isSaved}
+                              className={`px-2.5 py-1 text-[11px] font-bold rounded disabled:opacity-80 ${
+                                isSaved
+                                  ? 'bg-emerald-500 text-white cursor-default'
+                                  : 'bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50'
+                              }`}
                             >
-                              {isSaving ? '...' : 'Save'}
+                              {isSaving ? '...' : isSaved ? 'Saved ✓' : 'Save'}
                             </button>
                           )}
                           {v.override?.override_type && v.override.override_type !== 'product_rules' && (

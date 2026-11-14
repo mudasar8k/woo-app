@@ -488,11 +488,13 @@ export default function ProductPriceOverrideCard({
       {showVariationModal && (
         <VariationPriceOverrideModal
           isOpen={showVariationModal}
-          onClose={() => setShowVariationModal(false)}
+          onClose={() => {
+            setShowVariationModal(false)
+            router.refresh()
+          }}
           storeId={storeId}
           productId={productId}
           product={product}
-          onSaved={() => router.refresh()}
         />
       )}
 

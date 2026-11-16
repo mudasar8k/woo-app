@@ -9,7 +9,7 @@ const VAR_PAGE_SIZE = 25
 
 export default function ProductDetail({ storeId, connectionMethod, priceRulePercent = null, product, variations }) {
   const isPluginStore = connectionMethod === 'plugin'
-  const storePricing = { price_rule_percent: priceRulePercent }
+  const storePricing = useMemo(() => ({ price_rule_percent: priceRulePercent }), [priceRulePercent])
   const router = useRouter()
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')

@@ -1,9 +1,11 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
 import { useRouter } from 'next/navigation'
 import { formatMoney, resolveCostPrice, resolveStorePrice } from '@/app/lib/pricing'
 import ProductPriceOverrideCard from '@/app/components/ProductPriceOverrideCard'
+
+const VAR_PAGE_SIZE = 25
 
 export default function ProductDetail({ storeId, connectionMethod, priceRulePercent = null, product, variations }) {
   const isPluginStore = connectionMethod === 'plugin'
@@ -12,6 +14,17 @@ export default function ProductDetail({ storeId, connectionMethod, priceRulePerc
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [editMode, setEditMode] = useState(false)
+
+  // ── Variation filter state ────────────────────────────────────────────────
+  const [filterSize, setFilterSize] = useState('')
+  const [filterColor, setFilterColor] = useState('')
+  const [filterCostMin, setFilterCostMin] = useState('')
+  const [filterCostMax, setFilterCostMax] = useState('')
+  const [filterPriceMin, setFilterPriceMin] = useState('')
+  const [filterPriceMax, setFilterPriceMax] = useState('')
+  const [sortField, setSortField] = useState(null) // 'cost' | 'storePrice' | null
+  const [sortDir, setSortDir] = useState('asc')
+  const [varPage, setVarPage] = useState(1)
   const [formData, setFormData] = useState({
     name: product.name,
     sku: product.sku,
@@ -25,6 +38,110 @@ export default function ProductDetail({ storeId, connectionMethod, priceRulePerc
     categories: product.categories || '',
     tags: product.tags || '',
   })
+
+  // ── Derived filter options ────────────────────────────────────────────────
+  const distinctSizes = useMemo(() => {
+    const s = new Set()
+    variations.forEach((v) => { if (v.size) s.add(v.size.trim()) })
+    return Array.from(s).sort((a, b) => a.localeCompare(b))
+  }, [variations])
+
+  const distinctColors = useMemo(() => {
+    const s = new Set()
+    variations.forEach((v) => { if (v.color) s.add(v.color.trim()) })
+    return Array.from(s).sort((a, b) => a.localeCompare(b))
+  }, [variations])
+
+  const hasActiveFilters =
+    filterSize !== '' ||
+    filterColor !== '' ||
+    filterCostMin !== '' ||
+    filterCostMax !== '' ||
+    filterPriceMin !== '' ||
+    filterPriceMax !== ''
+
+  const clearFilters = () => {
+    setFilterSize('')
+    setFilterColor('')
+    setFilterCostMin('')
+    setFilterCostMax('')
+    setFilterPriceMin('')
+    setFilterPriceMax('')
+    setSortField(null)
+    setSortDir('asc')
+    setVarPage(1)
+  }
+
+  // ── Filtered + sorted variations (whole dataset, before pagination) ───────
+  const filteredVariations = useMemo(() => {
+    const costMinNum = filterCostMin !== '' ? parseFloat(filterCostMin) : null
+    const costMaxNum = filterCostMax !== '' ? parseFloat(filterCostMax) : null
+    const priceMinNum = filterPriceMin !== '' ? parseFloat(filterPriceMin) : null
+    const priceMaxNum = filterPriceMax !== '' ? parseFloat(filterPriceMax) : null
+
+    let result = variations.filter((v) => {
+      if (filterSize && (!v.size || v.size.trim().toLowerCase() !== filterSize.toLowerCase())) return false
+      if (filterColor && (!v.color || v.color.trim().toLowerCase() !== filterColor.toLowerCase())) return false
+
+      const cost = resolveCostPrice(v)
+      if (costMinNum !== null && !Number.isNaN(costMinNum)) {
+        if (cost === null || cost < costMinNum) return false
+      }
+      if (costMaxNum !== null && !Number.isNaN(costMaxNum)) {
+        if (cost === null || cost > costMaxNum) return false
+      }
+
+      // Use the identical resolveStorePrice call that the display column uses
+      const storePrice = resolveStorePrice(v, storePricing)
+      if (priceMinNum !== null && !Number.isNaN(priceMinNum)) {
+        if (storePrice === null || storePrice < priceMinNum) return false
+      }
+      if (priceMaxNum !== null && !Number.isNaN(priceMaxNum)) {
+        if (storePrice === null || storePrice > priceMaxNum) return false
+      }
+
+      return true
+    })
+
+    if (sortField) {
+      result = [...result].sort((a, b) => {
+        const aVal = sortField === 'cost' ? resolveCostPrice(a) : resolveStorePrice(a, storePricing)
+        const bVal = sortField === 'cost' ? resolveCostPrice(b) : resolveStorePrice(b, storePricing)
+        if (aVal === null && bVal === null) return 0
+        if (aVal === null) return 1
+        if (bVal === null) return -1
+        return sortDir === 'asc' ? aVal - bVal : bVal - aVal
+      })
+    }
+
+    return result
+  }, [variations, filterSize, filterColor, filterCostMin, filterCostMax, filterPriceMin, filterPriceMax, sortField, sortDir, storePricing])
+
+  const totalVarPages = Math.max(1, Math.ceil(filteredVariations.length / VAR_PAGE_SIZE))
+  const paginatedVariations = useMemo(() => {
+    const start = (varPage - 1) * VAR_PAGE_SIZE
+    return filteredVariations.slice(start, start + VAR_PAGE_SIZE)
+  }, [filteredVariations, varPage])
+
+  const handleFilterChange = (setter) => (val) => {
+    setter(val)
+    setVarPage(1)
+  }
+
+  const handleSortToggle = (field) => {
+    if (sortField === field) {
+      setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'))
+    } else {
+      setSortField(field)
+      setSortDir('asc')
+    }
+    setVarPage(1)
+  }
+
+  const SortIcon = ({ field }) => {
+    if (sortField !== field) return <span className="ml-1 text-gray-300">↕</span>
+    return <span className="ml-1 text-indigo-600">{sortDir === 'asc' ? '↑' : '↓'}</span>
+  }
 
   const getStatusBadge = (status) => {
     const colors = {
@@ -304,7 +421,116 @@ export default function ProductDetail({ storeId, connectionMethod, priceRulePerc
 
       {variations.length > 0 && (
         <div className="mt-8">
-          <h3 className="text-lg font-medium mb-4">Variations</h3>
+          <h3 className="text-lg font-medium mb-3">Variations</h3>
+
+          {/* ── Filter Toolbar ─────────────────────────────────────────────── */}
+          <div className="mb-3 p-3 bg-gray-50 border border-gray-200 rounded-lg flex flex-wrap items-end gap-3 text-xs">
+            {/* Size */}
+            {distinctSizes.length > 0 && (
+              <div className="flex flex-col gap-1 min-w-[110px]">
+                <label className="font-semibold text-gray-600 uppercase tracking-wide">Size</label>
+                <select
+                  value={filterSize}
+                  onChange={(e) => handleFilterChange(setFilterSize)(e.target.value)}
+                  className="px-2 py-1.5 border border-gray-300 rounded bg-white text-gray-800"
+                >
+                  <option value="">All sizes</option>
+                  {distinctSizes.map((s) => (
+                    <option key={s} value={s}>{s}</option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            {/* Color */}
+            {distinctColors.length > 0 && (
+              <div className="flex flex-col gap-1 min-w-[130px]">
+                <label className="font-semibold text-gray-600 uppercase tracking-wide">Colour</label>
+                <select
+                  value={filterColor}
+                  onChange={(e) => handleFilterChange(setFilterColor)(e.target.value)}
+                  className="px-2 py-1.5 border border-gray-300 rounded bg-white text-gray-800"
+                >
+                  <option value="">All colours</option>
+                  {distinctColors.map((c) => (
+                    <option key={c} value={c}>{c}</option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            {/* Cost range */}
+            <div className="flex flex-col gap-1">
+              <label className="font-semibold text-gray-600 uppercase tracking-wide">Cost (£)</label>
+              <div className="flex items-center gap-1">
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  value={filterCostMin}
+                  onChange={(e) => handleFilterChange(setFilterCostMin)(e.target.value)}
+                  placeholder="Min"
+                  className="w-20 px-2 py-1.5 border border-gray-300 rounded font-mono"
+                />
+                <span className="text-gray-400">–</span>
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  value={filterCostMax}
+                  onChange={(e) => handleFilterChange(setFilterCostMax)(e.target.value)}
+                  placeholder="Max"
+                  className="w-20 px-2 py-1.5 border border-gray-300 rounded font-mono"
+                />
+              </div>
+            </div>
+
+            {/* Store price range */}
+            <div className="flex flex-col gap-1">
+              <label className="font-semibold text-gray-600 uppercase tracking-wide">Store Price (£)</label>
+              <div className="flex items-center gap-1">
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  value={filterPriceMin}
+                  onChange={(e) => handleFilterChange(setFilterPriceMin)(e.target.value)}
+                  placeholder="Min"
+                  className="w-20 px-2 py-1.5 border border-gray-300 rounded font-mono"
+                />
+                <span className="text-gray-400">–</span>
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  value={filterPriceMax}
+                  onChange={(e) => handleFilterChange(setFilterPriceMax)(e.target.value)}
+                  placeholder="Max"
+                  className="w-20 px-2 py-1.5 border border-gray-300 rounded font-mono"
+                />
+              </div>
+            </div>
+
+            {/* Clear */}
+            {hasActiveFilters && (
+              <button
+                type="button"
+                onClick={clearFilters}
+                className="self-end px-3 py-1.5 bg-white border border-gray-300 rounded text-gray-700 hover:bg-gray-100 font-medium"
+              >
+                Clear filters
+              </button>
+            )}
+          </div>
+
+          {/* ── Summary row ───────────────────────────────────────────────── */}
+          <p className="mb-2 text-xs text-gray-500">
+            Showing <strong>{filteredVariations.length}</strong> of <strong>{variations.length}</strong> variations
+            {totalVarPages > 1 && (
+              <span className="ml-1">(page {varPage} of {totalVarPages})</span>
+            )}
+          </p>
+
           <div className="overflow-x-auto">
             <table className="min-w-full divide-y divide-gray-200">
               <thead className="bg-gray-50">
@@ -313,8 +539,18 @@ export default function ProductDetail({ storeId, connectionMethod, priceRulePerc
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Size</th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Color</th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Attributes</th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Cost</th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Store price</th>
+                  <th
+                    className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase cursor-pointer select-none hover:text-indigo-600"
+                    onClick={() => handleSortToggle('cost')}
+                  >
+                    Cost <SortIcon field="cost" />
+                  </th>
+                  <th
+                    className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase cursor-pointer select-none hover:text-indigo-600"
+                    onClick={() => handleSortToggle('storePrice')}
+                  >
+                    Store price <SortIcon field="storePrice" />
+                  </th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Stock</th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Tax class</th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Images</th>
@@ -322,47 +558,92 @@ export default function ProductDetail({ storeId, connectionMethod, priceRulePerc
                 </tr>
               </thead>
               <tbody className="bg-white divide-y divide-gray-200">
-                {variations.map((variation) => (
-                  <tr key={variation.id}>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                      {variation.sku || '-'}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                      {variation.size || '-'}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                      {variation.color || '-'}
-                    </td>
-                    <td className="px-6 py-4 text-sm text-gray-500">
-                      {variation.attributes || '-'}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                      {formatMoney(resolveCostPrice(variation))}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 font-medium">
-                      {formatMoney(resolveStorePrice(variation, storePricing))}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                      {variation.stock_quantity !== null ? variation.stock_quantity : '-'}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                      {variation.tax_class || '-'}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                      {variation.images
-                        ? `${String(variation.images).split(',').filter(Boolean).length}`
-                        : variation.image
-                          ? '1'
-                          : '-'}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      {getStatusBadge(variation.status)}
+                {paginatedVariations.length === 0 ? (
+                  <tr>
+                    <td colSpan={10} className="px-6 py-10 text-center text-sm text-gray-400">
+                      No variations match the current filters.{' '}
+                      {hasActiveFilters && (
+                        <button
+                          type="button"
+                          onClick={clearFilters}
+                          className="text-indigo-600 hover:underline font-medium"
+                        >
+                          Clear filters
+                        </button>
+                      )}
                     </td>
                   </tr>
-                ))}
+                ) : (
+                  paginatedVariations.map((variation) => (
+                    <tr key={variation.id}>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                        {variation.sku || '-'}
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                        {variation.size || '-'}
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                        {variation.color || '-'}
+                      </td>
+                      <td className="px-6 py-4 text-sm text-gray-500">
+                        {variation.attributes || '-'}
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                        {formatMoney(resolveCostPrice(variation))}
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 font-medium">
+                        {formatMoney(resolveStorePrice(variation, storePricing))}
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                        {variation.stock_quantity !== null ? variation.stock_quantity : '-'}
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                        {variation.tax_class || '-'}
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                        {variation.images
+                          ? `${String(variation.images).split(',').filter(Boolean).length}`
+                          : variation.image
+                            ? '1'
+                            : '-'}
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        {getStatusBadge(variation.status)}
+                      </td>
+                    </tr>
+                  ))
+                )}
               </tbody>
             </table>
           </div>
+
+          {/* ── Pagination ─────────────────────────────────────────────────── */}
+          {totalVarPages > 1 && (
+            <div className="mt-3 flex items-center justify-between text-xs text-gray-600">
+              <span>
+                {(varPage - 1) * VAR_PAGE_SIZE + 1}–{Math.min(filteredVariations.length, varPage * VAR_PAGE_SIZE)} of {filteredVariations.length}
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  disabled={varPage <= 1}
+                  onClick={() => setVarPage((p) => Math.max(1, p - 1))}
+                  className="px-3 py-1.5 bg-white border border-gray-300 rounded font-semibold text-gray-700 hover:bg-gray-50 disabled:opacity-40"
+                >
+                  Previous
+                </button>
+                <span className="font-semibold">Page {varPage} of {totalVarPages}</span>
+                <button
+                  type="button"
+                  disabled={varPage >= totalVarPages}
+                  onClick={() => setVarPage((p) => Math.min(totalVarPages, p + 1))}
+                  className="px-3 py-1.5 bg-white border border-gray-300 rounded font-semibold text-gray-700 hover:bg-gray-50 disabled:opacity-40"
+                >
+                  Next
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>
